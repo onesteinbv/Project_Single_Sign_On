@@ -1,0 +1,34 @@
+# This is an example hosts file.
+# All hosts have the same IP so it is easier for me to test.
+
+[grpad]
+ad  ansible_host=10.1.1.123
+
+[grpzabbixserver]
+zabbix ansible_host=10.1.1.123
+
+[grpxwiki]
+wiki ansible_host=10.1.1.123
+
+[grpcmdb]
+cmdb  ansible_host=10.1.1.123
+
+[grpgitlab]
+gitlab  ansible_host=10.1.1.123
+
+[grpnc]
+nc  ansible_host=10.1.1.123
+
+[grpjenkins]
+jenkins  ansible_host=10.1.1.123
+
+[grpbitwarden]
+password ansible_host=10.1.1.123 
+
+[grpodoo15]
+odoo15	ansible_host=10.1.1.123
+
+[grpodoo14]
+odoo14	ansible_host=10.1.1.123
+
+
