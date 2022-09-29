@@ -1,6 +1,21 @@
 # Project Single Sign On
 
-Over the past months, Onestein has sponsored the development of a set of Ansible playbooks to configure Single Sign On (SSO) for several popular open source applications.
+Over the past months, Onestein has sponsored the development of a set of
+Ansible playbooks to configure Single Sign On (SSO) for several popular open
+source applications.
+
+Currently it contains playbooks for the following applications:
+
+- Bitwarden
+- CMDBuild is being worked on
+- Jenkins
+- Gitlab
+- Keycloak (not SSO, but identity provider)
+- Nextcloud
+- Odoo 14
+- Odoo 15
+- Xwiki
+- Zabbix
 
 These Ansible playbooks do not use roles or other advanced stuff.
 They are as 'flat' as possible so that a sysadmin can easily read how they work and what they do.
