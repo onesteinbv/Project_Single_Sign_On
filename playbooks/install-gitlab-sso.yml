@@ -1,0 +1,433 @@
+---
+- name: Install gitlab on Ubuntu 20.04
+  hosts: grpgitlab
+  remote_user: root
+
+  # use this command line: ansible-playbook  -vvv  --ask-pass  --ask-become-pass  setup-new-server.yml  -i 10.1.1.158,  -u jeroen
+  # Execute ansible-playbook playbookfile.yml -i hosts --vault-password-file .vault-password
+
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    root_ca_path: /usr/local/share/ca-certificates/mkcert_development_CA_62268663181785622328732999788222374785.crt
+    gitlab_server_url: "https://gitlab.{{ domain }}"
+    gitlab_client_id: "client-gitlab-{{ ansible_fqdn }}"
+    gitlab_client_name: "client-gitlab-{{ ansible_fqdn }}"
+
+
+  tasks:
+    - debug:
+        msg: Readable debug output  export ANSIBLE_STDOUT_CALLBACK=debug
+
+    - name: Read encrypted content
+      include_vars: encrypted-vars.yml
+
+    - name: Read global variables
+      include_vars: global-vars.yml
+
+
+    - name: Shutdown GitLab if already exists and ignore any errors
+      shell:
+        cmd: gitlab-ctl stop
+      ignore_errors: yes
+
+
+    # Install all needed software in one go.
+    # apt install -y ca-certificates curl openssh-server
+    - name: Install GitLab and other packages
+      apt:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - ca-certificates
+        - curl
+        - openssh-server
+        - mlocate  
+        - openssl  
+        - autopostgresqlbackup
+       
+    - name: Upload mkcert program 
+      copy:
+        src: files/mkcert
+        dest: /root/mkcert
+        owner: root
+        group: root
+        mode: '0700'
+        force: true
+
+    - name: Upload CA key and cert
+      copy:
+        src: "files/{{ item }}"
+        dest: "/root/{{ item }}"
+        owner: root
+        group: root
+        mode: '0600'
+        force: true
+      with_items:
+        - rootCA.pem
+        - rootCA-key.pem
+
+    - name: Try to install my root CA on this system
+      shell:
+        cmd: CAROOT=/root /root/mkcert -install
+
+    - name: Update all CA certificates
+      shell:
+        cmd: /usr/sbin/update-ca-certificates 
+
+    # Check if our CA is already installed
+    # Should be /usr/local/share/ca-certificates/mkcert_development_CA_62268663181785622328732999788222374785.crt
+    - name: Verify that our root CA is already installed
+      stat:
+        path: "{{ root_ca_path }}"
+      register: root_ca_stat
+
+    - name: Is our root CA already present?
+      debug:
+        msg: "Yes it is!" 
+      when: root_ca_stat.stat.exists
+
+    # Start installation of GitLab
+    - name: Download repo add script.
+      get_url:
+        url: https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.deb.sh 
+        dest: /tmp/script.deb.sh
+        mode: '0700'
+  
+    - name: execute repo add script
+      shell:
+        cmd: /tmp/script.deb.sh
+
+    ########################################################
+    # After this step we should have a GitLab installation #
+    ########################################################
+    - name: Install gitlab-ce
+      apt:
+        name: gitlab-ce
+
+    - name: Set timezone to Europe/Amsterdam
+      community.general.timezone:
+        name: Europe/Amsterdam
+
+    # fix external_url 'http://gitlab.example.com'
+    - name: Configure gitlab-ce url
+      lineinfile:
+        path: /etc/gitlab/gitlab.rb
+        regexp: "external_url.*"
+        line: "external_url '{{ gitlab_server_url }}'"
+
+    # Disable GitLab LetsEncrypt support as mentioned on their page
+    # letsencrypt['enable'] = false in /etc/gitlab/gitlab.rb
+    - name: Make sure LetsEncrypt is disabled
+      lineinfile:
+        path: /etc/gitlab/gitlab.rb
+        regexp: ".*letsencrypt['enable'].*"
+        line: letsencrypt['enable'] = false 
+        state: present
+
+
+    # Copy SSL files to gitlab /opt/gitlab/embedded/ssl/certs 
+    # To set the location of ssl certificates create /etc/gitlab/ssl directory, 
+    - name: Make SSL dir for GitLab    
+      ansible.builtin.file:
+        path: /etc/gitlab/ssl
+        state: directory
+        mode: '0755'
+ 
+    # place the .crt and .key files in the directory and specify the following configuration:
+
+    - name: Copy SSL cert to gitlab ssl certs dir /etc/gitlab/ssl
+      copy:
+        src: "files/_wildcard.{{ domain }}.pem"
+        dest: "/etc/gitlab/ssl/gitlab.{{ domain }}.crt"
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Copy SSL key to gitlab ssl certs dir /etc/gitlab/ssl
+      copy:
+        src: "files/_wildcard.{{ domain }}-key.pem"
+        dest: "/etc/gitlab/ssl/gitlab.{{ domain }}.key"
+        owner: root
+        group: root
+        mode: '0600'
+
+    # nginx['ssl_certificate'] = "/etc/gitlab/ssl/gitlab.example.com.crt"
+    - name: Configure fixed SSL cert file
+      lineinfile:
+        path: /etc/gitlab/gitlab.rb
+        regexp: ".*nginx['ssl_certificate'].*"
+        line: "nginx['ssl_certificate'] = \"/etc/gitlab/ssl/gitlab.{{ domain }}.crt\""
+ 
+    # nginx['ssl_certificate_key'] = "/etc/gitlab/ssl/gitlab.example.com.key"
+    - name: Configure fixed SSL cert key file
+      lineinfile:
+        path: /etc/gitlab/gitlab.rb
+        regexp: ".*nginx['ssl_certificate_key'].*"
+        line: "nginx['ssl_certificate_key'] = \"/etc/gitlab/ssl/gitlab.{{ domain }}.key\""
+ 
+    # Remove old LDAP stuff
+    # gitlab_rails['ldap_enabled'] = true
+    - name: Remove if enable ldap setting in GitLab config file
+      lineinfile:
+        path: /etc/gitlab/gitlab.rb
+        regexp: ".*gitlab_rails['ldap_enabled'].*"
+        state: absent
+    
+    # gitlab_rails['ldap_servers'] = YAML.load_file('/etc/gitlab/gitlab_freeipa_settings.yml')
+#   - name: Remove if exists reference to LDAP settings file
+#     lineinfile:
+#       path: /etc/gitlab/gitlab.rb
+#       line: "gitlab_rails['ldap_servers'].*"
+#       state: absent
+
+    # Retrieve token url needed.  Returns JSON payload with var token-service.
+    - name: Retrieve token url from server
+      uri:
+        url: "{{ keycloak_server_url }}/realms/master"
+        validate_certs: false
+      register: tokenurl
+
+    - debug:
+        var: tokenurl.json["token-service"] 
+
+    - name: Store url for easier retrieval
+      set_fact:
+        token_url: "{{ tokenurl.json[\"token-service\"] }}"
+
+    # Call info endpoint 
+    - name: "Retrieve endpoint info for our realm {{ realm }}"
+      uri:
+        url: "{{ keycloak_server_url }}/realms/{{ realm }}/.well-known/openid-configuration"
+        validate_certs: false
+      register: endpointinfo
+
+    - debug:
+        var: endpointinfo
+   
+    - name: Store authorization_endpoint for faster retrieval
+      set_fact:
+        authorization_endpoint: "{{ endpointinfo.json[\"authorization_endpoint\"] }}"
+
+    # "authorization_endpoint": "https://ad.onestein.lan/realms/ONESTEIN.LAN/protocol/openid-connect/auth",
+    - debug:
+        var: authorization_endpoint
+
+    - name: Store token_endpoint for faster retrieval
+      set_fact:
+        token_endpoint: "{{ endpointinfo.json[\"token_endpoint\"] }}"
+    - debug:
+        var: token_endpoint
+
+    - name: Store userinfo_endpoint for faster retrieval
+      set_fact:
+        userinfo_endpoint: "{{ endpointinfo.json[\"userinfo_endpoint\"] }}"
+    - debug:
+        var: userinfo_endpoint
+
+    # Get authentication token from token-service url
+    - name: Retrieve authentication token from token-service url
+      uri:
+        url: "{{ tokenurl.json[\"token-service\"] }}/token"
+        method: POST
+        body_format: form-urlencoded
+        validate_certs: false
+        body:
+          realm: master
+          client_id: admin-cli
+          username: "{{ kc_kc_adminid }}"
+          password: "{{ kc_kc_adminpw }}"
+          grant_type: password
+      register: authtoken
+
+    - debug:
+        var: authtoken
+
+    - debug:
+        var: authtoken.json["access_token"]  
+
+    - name: Store access token into variable for easier retrieval
+      set_fact:
+        auth_token: "{{ authtoken.json[\"access_token\"] }}"
+
+    - debug:
+        var: auth_token  
+
+    #######################################################################################
+    # Very badly documented: The admin RESTful API has a base path /admin/realms/
+    #######################################################################################
+    
+    # Retrieve current list of clients of our type
+    # So, this works in curl:
+    # curl -k -v -H "Accept: application/json" -H "Authorization: Bearer ${access_token}" "https://ad.onestein.lan:8443/admin/realms/master/clients" | jq .
+    - name: Retrieve current list of clients and search for already existing "{{ gitlab_client_id }} "
+      uri:
+        url: "{{ keycloak_server_url }}/admin/realms/{{ realm }}/clients?clientId={{ gitlab_client_id }}"
+        headers:
+         Accept: "application/json"
+         Authorization: "Bearer {{ auth_token }}" 
+        method: get
+        validate_certs: false
+      register: existingclient
+
+    - name: Find ID in returned json
+      debug:
+        var: existingclient.json[0].id
+
+    - name: Delete client id  "{{ gitlab_client_id }}" if it already exists.
+      # Example: "id": "ba973624-2d00-488f-8d18-154224c63f8f"
+      uri:
+        url: "{{ keycloak_server_url }}/admin/realms/{{ realm }}/clients/{{ existingclient.json[0].id }}"
+        headers:
+         Accept: "application/json"
+         Authorization: "Bearer {{ auth_token }}" 
+        method: DELETE
+        validate_certs: false
+        status_code: 204
+      when: existingclient.json[0].id is defined
+      register: deleteclient
+ 
+    - debug:
+        var: deleteclient
+
+    - name: Convert Ninja template to variable
+      set_fact:
+        jsonbody: "{{ lookup('template', 'gitlab-keycloak-sso.json.j2') }}"
+
+#   - debug:
+#       var: jsonbody
+
+    # Generate the json payload to upload
+    - name: Upload JSON template file to create new Client ID on Keycloak server
+      uri:
+        url: "{{ keycloak_server_url }}/admin/realms/{{ realm }}/clients"
+        headers:
+         Accept: "application/json"
+         Authorization: "Bearer {{ auth_token }}" #.json[\"access_token\"]  }}"
+        method: POST
+        validate_certs: false
+        body_format: json
+        body: "{{ jsonbody }}"
+        status_code: 201
+      register: createclientresult
+   
+    # Good news! Result contains location of new client id in location
+    # Example: "location": "https://ad.onestein.lan:8443/admin/realms/ONESTEIN.LAN/clients/e01a87cf-537c-441e-b6ee-17f4cd07d92c"
+    - name: If all went well we now have a locaton of the newly created Client ID
+      debug:
+        var: createclientresult.location
+
+    # After importing this to Keycloak, you have to generate a new Client-Secret and put it into gitabl.rb file .
+    # GET /{realm}/clients/{id}/client-secret
+    - name: Retrieve secret for newly created client "{{ gitlab_client_id }} "
+      uri:
+        url: "{{ createclientresult.location }}/client-secret"
+        headers:
+         Accept: "application/json"
+         Authorization: "Bearer {{ auth_token }}" 
+        method: get
+        validate_certs: false
+      register: clientsecret
+
+    - name: Store secret for easy retrieval
+      set_fact:
+        client_secret: "{{ clientsecret.json.value }}"
+
+    # gitlab_rails['omniauth_enabled'] = true
+    - name: Configure omniauth_enabled
+      lineinfile:
+        path: /etc/gitlab/gitlab.rb
+        regexp: ".*gitlab_rails['omniauth_enabled'].*"
+        line: "gitlab_rails['omniauth_enabled'] = true"
+
+    # gitlab_rails['omniauth_allow_single_sign_on'] = ['openid_connect']
+    # Create users through authentication integrations
+    # Automatically created upon first sign in with the LDAP integration.
+    # Created when first signing in using an OmniAuth provider if the allow_single_sign_on setting is present.
+    - name: Configure omniauth_allow_single_sign_on
+      lineinfile:
+        path: /etc/gitlab/gitlab.rb
+        regexp: ".*gitlab_rails['omniauth_allow_single_sign_on'].*"
+        line: "gitlab_rails['omniauth_allow_single_sign_on'] = true"
+        #line: "gitlab_rails['omniauth_allow_single_sign_on'] = ['openid_connect']"
+
+    # gitlab_rails['omniauth_block_auto_created_users'] = false
+    - name: Configure omniauth_block_auto_created_users
+      lineinfile:
+        path: /etc/gitlab/gitlab.rb
+        regexp: ".*gitlab_rails['omniauth_block_auto_created_users'].*"
+        line: "gitlab_rails['omniauth_block_auto_created_users'] = true"
+        #line: "gitlab_rails['omniauth_block_auto_created_users'] = false"
+
+    # Numerous openid connect errors about ssl cert verify failed seem to go away with this line
+    # https://forum.gitlab.com/t/500-error-after-keycloak-login-certificate-verify-failed-unable-to-get-local-issuer-certificate/49065/6
+    - name: Add pointer to undefined SSL_CERT_FILE to fix ssl cert verify failed errors
+      lineinfile:
+        path: /etc/gitlab/gitlab.rb
+        regexp: ".*gitlab_rails['env'].*"
+        line: "gitlab_rails['env'] = {\"SSL_CERT_FILE\" => \"/etc/ssl/certs/ca-certificates.crt\"}"
+
+    # TODO Do we need this?
+    # gitlab_rails['omniauth_auto_link_user'] = ['openid_connect']
+ 
+    # Trust me on this. Getting this to work is a PITA!
+    # Ensure discovery is set to true. Setting it to false requires specifying all the URLs and keys required to make OpenID work
+    - name: Insert/Update 'omniauth_providers' configuration block in /etc/gitlab/gitlab.rb
+      ansible.builtin.blockinfile:
+        path: /etc/gitlab/gitlab.rb
+        marker: "# {mark} ANSIBLE MANAGED BLOCK for Keycloak "
+        block: |
+          gitlab_rails['omniauth_providers'] = [
+          {
+            name: "openid_connect",
+            label: "Network login", 
+            args: {
+              name: "openid_connect",
+              scope: ["openid","profile","email"],
+              response_type: "code",
+              issuer: "{{ keycloak_server_url }}/realms/{{ realm }}",
+              discovery: true,
+              client_auth_method: "query",
+              uid_field: "sub",
+              send_scope_to_token_endpoint: "false",
+              client_options: {
+                identifier: "{{ gitlab_client_id }}",
+                secret: "{{ client_secret }}",
+                redirect_uri: "{{ gitlab_server_url }}/users/auth/openid_connect/callback"
+              }
+            }
+          } ]
+
+    - name: Run GitLab reconfiguration script
+      shell:
+        cmd: gitlab-ctl reconfigure
+
+    - name: Start GitLab 
+      shell:
+        cmd: gitlab-ctl start
+
+    - debug:
+        msg: "Start waiting for 443"
+
+    - name: Wait for port 443 to become open on the host
+      uri:
+        url: "{{ gitlab_server_url }}/users/sign_in"
+        status_code: 200
+      register: result
+      until: result.status == 200
+      # Measured 12 attempts, so 25 max should work most of the time.
+      retries: 25
+      delay: 10
+        
+    - debug:
+        msg: "Done waiting for 443"
+
+    # Are we really done now?
+
+    # Tip? 
+    # gitlab-ctl stop ; export GITLAB_LOG_LEVEL=debug ; gitlab-ctl start ; gitlab-ctl tail
+    # or add to gitlab.rb:
+    # registry['log_level'] = 'info'
+    # gitlab_shell['log_level'] = 'INFO'
+    # gitaly['logging_level'] = 'warn'
+    
+

@@ -11,7 +11,7 @@ Currently it contains playbooks for the following applications:
 - Bitwarden: [part 1](playbooks/install-bitwarden-part-1.yml), [part 2](playbooks/install-bitwarden-part-2-saml-sso.yml)
 - CMDBuild is being worked on
 - [Jenkins](playbooks/install-jenkins-sso.yml)
-- Gitlab
+- [Gitlab](playbooks/install-gitlab-sso.yml)
 - Keycloak (not SSO, but identity provider)
 - Nextcloud
 - Odoo 14
