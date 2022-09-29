@@ -1,0 +1,577 @@
+---
+- name: Install Xwiki
+  hosts: grpxwiki
+  remote_user: root
+
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    xwiki_server_url: "https://wiki.{{ domain }}"
+    xwiki_client_id: "client-xwiki-{{ ansible_fqdn }}"
+    xwiki_client_name: "client-xwiki-{{ ansible_fqdn }}"
+
+
+  tasks:
+    - debug:
+        msg: Readable debug output  export ANSIBLE_STDOUT_CALLBACK=debug
+
+    - name: Read encrypted content
+      include_vars: encrypted-vars.yml
+
+    - name: Read global variables
+      include_vars: vars.yml
+
+    - name: Download Xwiki  repo key
+      # sudo wget https://maven.xwiki.org/xwiki-keyring.gpg -P /usr/share/keyrings/
+      get_url:
+        url: https://maven.xwiki.org/xwiki-keyring.gpg
+        dest: /usr/share/keyrings/xwiki-keyring.gpg
+        mode: '0644'
+  
+    - name: Download Xwiki  repo
+      # sudo wget "https://maven.xwiki.org/stable/xwiki-stable.list" -P /etc/apt/sources.list.d/
+      # Note that there is several repositories you can choose (as alternatives to the stable one you have in the previous example):
+      # https://maven.xwiki.org/releases/xwiki-releases.list: all released versions including milestones and release candidates (beta)
+      # https://maven.xwiki.org/stable/xwiki-stable.list: all released versions excluding milestones and release candidates (stable)
+      # https://maven.xwiki.org/lts/xwiki-lts.list: the current "long term support" branch versions as defined in Support page
+      get_url:
+        url: https://maven.xwiki.org/lts/xwiki-lts.list
+        dest: /etc/apt/sources.list.d/xwiki-lts.list
+        mode: '0644'
+
+    - name: Update repositories cache 
+      apt:
+        update_cache: yes
+
+    - name: Set timezone to Europe/Amsterdam
+      timezone:
+        name: "{{ timezone }}"
+
+    - name: Install Xwiki and Libreoffice
+      apt:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - openjdk-11-jre-headless
+        - xwiki-tomcat9-pgsql
+        - libreoffice
+        - autopostgresqlbackup
+        - mlocate  
+        - openssl  
+        - apache2
+
+    - name: Make sure no nginx installed
+      apt:
+        name: nginx
+        state: absent
+
+    # Configure Apache with SSL
+    - name: Enable Apache module proxy
+      apache2_module:
+        state: present
+        name: proxy
+
+    - name: Enable Apache module proxy_http
+      apache2_module:
+        state: present
+        name: proxy_http
+
+    - name: Enable Apache module ssl
+      apache2_module:
+        state: present
+        name: ssl
+
+    - name: Enable Apache module rewrite
+      apache2_module:
+        state: present
+        name: rewrite
+
+    - name: Make SSL dir for apache    
+      ansible.builtin.file:
+        path: /etc/apache2/ssl
+        state: directory
+        mode: '0755'
+
+    - name: Copy SSL key and cert to apache ssl dir
+      copy:
+        src: "files/{{ item }}"
+        dest: "/etc/apache2/ssl/{{ item }}"
+        owner: root
+        group: root
+        mode: '0600'
+      loop:  
+        - _wildcard.{{ domain }}.pem
+        - _wildcard.{{ domain }}-key.pem
+
+    - name: Install Apache reverse proxy virtualhost for Keycloak 
+      template:
+        src: "xwiki_apache.conf"
+        dest: "/etc/apache2/sites-available/xwiki.conf"
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Enable virtualhost
+      shell:
+        cmd: a2ensite xwiki
+
+    - name: Restart Apache webserver
+      ansible.builtin.systemd:
+        name: apache2
+        enabled: yes
+        state: restarted
+
+      
+    - name: remove existing filestore if exists
+      file:
+        path: /etc/tomcat9/keystore.pkcs12
+        state: absent
+
+    # You will thank me later: https://coderwall.com/p/3t4xka/import-private-key-and-certificate-into-java-keystore
+    # USE PASSWORD!: changeit
+    - name: Export complete ssl chain into one file
+      shell:
+        cmd: /usr/bin/openssl pkcs12 -export -in /root/_wildcard.{{ domain }}.pem  -inkey /root/_wildcard.{{ domain }}-key.pem  -chain -CAfile /root/rootCA.pem -name "{{ domain }}" -passout pass:changeit -out "/root/{{ domain }}.p12"
+
+    - name: "Import wildcard key for i{{ domain }} into keycloak keystore file"
+      shell:
+        cmd: /usr/bin/keytool -importkeystore -srcstorepass changeit -deststorepass changeit  -destkeystore /etc/tomcat9/keystore.pkcs12 -srckeystore "/root/{{ domain }}.p12" -srcstoretype PKCS12
+        chdir: /etc/tomcat9/
+
+    # Enable Tomcat9 ssl connector on 8443
+    # Do not try to do this the hard way with some Ansible XML magix. It doesn't work. 
+    # Simply copy from local files
+    - name: Overwrite /etc/tomcat9/server.xml with enabled https connector definition from local file
+      copy:
+        src: files/xwiki_tomcat9_server.xml
+        dest: /etc/tomcat9/server.xml
+        owner: root
+        group: tomcat
+        force: yes
+        mode: '0640'
+
+    # Memory
+    # The default Tomcat memory setup is too low for XWiki's needs.
+    # You can change it in the file /etc/default/tomcat9 (or /etc/default/tomcat8 for Tomcat 8, etc).
+    # Modify the property JAVA_OPTS. For example:
+    # JAVA_OPTS="-Djava.awt.headless=true -Xmx1024m"
+    # Standard line: JAVA_OPTS="-Djava.awt.headless=true"
+
+    # /dev/urandom
+    # In most Debian-based systems the default random implementation is
+    # /dev/random which can be very slow. /dev/urandom is much faster and it's
+    # fine for XWiki's needs so you should use it when possible:
+    #     edit /etc/default/tomcat9 file and add
+    # JAVA_OPTS="${JAVA_OPTS} -Djava.security.egd=file:/dev/./urandom"
+    - name: Tune Java settings in /etc/default/tomcat9
+      lineinfile:
+        path: /etc/default/tomcat9
+        regexp: "JAVA_OPTS=.*"
+        line: 'JAVA_OPTS="$JAVA_OPTS -Djava.awt.headless=true -Djava.security.egd=file:/dev/./urandom -Xmx2048m" '
+
+
+    # Integrate with LibreOffice
+    # Install libreoffice with sudo apt-get install libreoffice.
+    # And setup XWiki to automatically start and access libreoffice in /etc/xwiki/xwiki.properties:
+    # openoffice.autoStart=true
+    # openoffice.homePath=/usr/lib/libreoffice/
+    # ====== Contents config file =======
+    # #-# Type of the openoffice server instance used by officeimporter component.
+    # openoffice.serverType = 0
+    #-# Port numbers used for connecting to the openoffice server instance.
+    # openoffice.serverPorts = 8100,8101
+    #-# If the openoffice server should be started / connected upon XE start.
+    # openoffice.autoStart = false
+    #-# Path to openoffice installation (serverType:0 only).
+    # openoffice.homePath = /opt/openoffice.org3/
+    #-# Path to openoffice execution profile (serverType:0 only).
+    # openoffice.profilePath = /home/user/.openoffice.org/3
+    #-# Maximum number of simultaneous conversion tasks to be handled by a single openoffice process (serverType:0 only).
+    # openoffice.maxTasksPerProcess = 50
+    # openoffice.taskExecutionTimeout = 60000
+    # ======================================
+
+    - name: Autostart Libreoffice integration into Xwiki
+      lineinfile:
+        path: /etc/xwiki/xwiki.properties
+        regexp: ".*openoffice.autoStart.*"
+        line: 'openoffice.autoStart=true'
+
+    - name: Config Libreoffice path for Xwiki
+      lineinfile:
+        path: /etc/xwiki/xwiki.properties
+        regexp: ".*openoffice.homePath.*"
+        line: 'openoffice.homePath=/usr/lib/libreoffice/'
+
+    # #-# Define a list of trusted domains that can be used in the wiki for performing requests or redirections even if
+    #-# the wiki does not use it. Domains are listed without http and separated with a comma in the list. Subdomains can be
+    #-# specified.
+    #-# Example of accepted value: foo.acme.org,enterprise.org
+    #-#
+    #-# By default the list of trusted domains is empty:
+    # url.trustedDomains=
+    - name: "Add url.trustedDomains={{ domain }} to /etc/xwiki/xwiki.properties"
+      lineinfile:
+        path: /etc/xwiki/xwiki.properties
+        regexp: ".*url.trustedDomains=.*"
+        line: "url.trustedDomains={{ domain }}"
+
+   
+    #-# Allow to enable or disable checks performed on domains by taking into account the list of trusted domains.
+    #-# Disable this property only if you experienced some issues on your wiki: some security check won't be performed when
+    #-# this property is set to false.
+    #-#
+    #-# By default this property is set to true:
+    # url.trustedDomainsEnabled=true
+
+    # Find xwiki.authentication.authclass in xwiki.cfg and comment it out with #-# in the beginning.
+    # Add below: xwiki.authentication.authclass=org.xwiki.contrib.oidc.auth.OIDCAuthServiceImpl
+    - name: Enable Keycloak SSO oidc auth services in Xwiki
+      lineinfile: 
+        path: /etc/xwiki/xwiki.cfg
+        regexp: ".*xwiki.authentication.authclass=.*"
+        line: "xwiki.authentication.authclass=org.xwiki.contrib.oidc.auth.OIDCAuthServiceImpl"
+
+    # xwiki.home=https://MYWIKIDOMAIN/
+    - name: Set xwiki.home in xwiki.cfg
+      lineinfile: 
+        path: /etc/xwiki/xwiki.cfg
+        regexp: ".*xwiki.home=.*"
+        line: "xwiki.home={{ xwiki_server_url }}" 
+
+
+    # Open xwiki.properties and adapt the following to your settings, and add this at the end of the file (Note the __XXX__ parts):
+    # oidc.xwikiprovider=https://__YOUR-WIKI-ADDRESS__/xwiki/oidc
+    - name: Configure oidc.xwikiprovider
+      lineinfile: 
+        path: /etc/xwiki/xwiki.properties
+        regexp: "oidc.xwikiprovider=.*"
+        line: "oidc.xwikiprovider={{ xwiki_server_url }}/xwiki/oidc"
+
+
+    # oidc.skipped=false
+    - name: Configure
+      lineinfile: 
+        path: /etc/xwiki/xwiki.properties
+        regexp: "oidc.skipped=.*"
+        line: "oidc.skipped=false"
+
+    # You now need to upload a json file to Keycloak.
+    # See templates/xwiki-keycloak-sso.json
+    # In KeyCloak making the client ID using the REST API
+
+    # Retrieve token url needed.  Returns JSON payload with var token-service.
+    # Example:
+    #   "realm": "master",
+    #  "public_key": VERY LONG STRING SHORTENED: "MIIBIjANBgkqhjn8ZDQIDAQAB",
+    #  "token-service": "https://ad.onestein.lan:8443/realms/master/protocol/openid-connect",
+    #  "account-service": "https://ad.onestein.lan:8443/realms/master/account",
+    #   "tokens-not-before": 0
+    - name: Retrieve token url from server
+      uri:
+        url: "{{ keycloak_server_url }}/realms/master"
+        validate_certs: false
+      register: tokenurl
+
+    - debug:
+        var: tokenurl.json["token-service"] 
+
+    - name: Store url for easier retrieval
+      set_fact:
+        token_url: "{{ tokenurl.json[\"token-service\"] }}"
+
+    # Call info endpoint 
+    # Curl example: curl -k GET "https://ad.onestein.lan:8443/realms/ONESTEIN.LAN/.well-known/openid-configuration"
+    # Example output:
+    #  "issuer": "https://ad.onestein.lan:8443/realms/ONESTEIN.LAN",
+    #  "authorization_endpoint": "https://ad.onestein.lan:8443/realms/ONESTEIN.LAN/protocol/openid-connect/auth",
+    #  "token_endpoint": "https://ad.onestein.lan:8443/realms/ONESTEIN.LAN/protocol/openid-connect/token",
+    #  "introspection_endpoint": "https://ad.onestein.lan:8443/realms/ONESTEIN.LAN/protocol/openid-connect/token/introspect",
+    #  "userinfo_endpoint": "https://ad.onestein.lan:8443/realms/ONESTEIN.LAN/protocol/openid-connect/userinfo",
+    #  "end_session_endpoint": "https://ad.onestein.lan:8443/realms/ONESTEIN.LAN/protocol/openid-connect/logout",
+    #  "frontchannel_logout_session_supported": true,
+    #  "frontchannel_logout_supported": true,
+    #  "jwks_uri": "https://ad.onestein.lan:8443/realms/ONESTEIN.LAN/protocol/openid-connect/certs",
+    #  "check_session_iframe": "https://ad.onestein.lan:8443/realms/ONESTEIN.LAN/protocol/openid-connect/login-status-iframe.html"
+    #  ... and a lot more...
+    - name: "Retrieve endpoint info for our realm {{ realm }}"
+      uri:
+        url: "{{ keycloak_server_url }}/realms/{{ realm }}/.well-known/openid-configuration"
+        validate_certs: false
+      register: endpointinfo
+
+    - debug:
+        var: endpointinfo
+   
+    - name: Store authorization_endpoint for faster retrieval
+      set_fact:
+        authorization_endpoint: "{{ endpointinfo.json[\"authorization_endpoint\"] }}"
+    - debug:
+        var: authorization_endpoint
+
+    - name: Store token_endpoint for faster retrieval
+      set_fact:
+        token_endpoint: "{{ endpointinfo.json[\"token_endpoint\"] }}"
+    - debug:
+        var: token_endpoint
+
+    - name: Store userinfo_endpoint for faster retrieval
+      set_fact:
+        userinfo_endpoint: "{{ endpointinfo.json[\"userinfo_endpoint\"] }}"
+    - debug:
+        var: userinfo_endpoint
+
+    # Relocated this code to here so we can generate better strings based on result of prior REST call
+    # oidc.endpoint.authorization=https://__KEYCLOAK-ADDRESS__/auth/realms/__REALM__/protocol/openid-connect/auth
+    - name: Configure oidc.endpoint.authorization
+      lineinfile: 
+        path: /etc/xwiki/xwiki.properties
+        regexp: "oidc.endpoint.authorization=.*"
+        line: "oidc.endpoint.authorization={{ authorization_endpoint }}"
+        #line: "oidc.endpoint.authorization={{ keycloak_server_url }}/realms/{{ realm }}/protocol/openid-connect/auth"
+
+    # oidc.endpoint.token=https://__KEYCLOAK-ADDRESS__/auth/realms/__REALM__/protocol/openid-connect/token
+    - name: Configure oidc.endpoint.token
+      lineinfile: 
+        path: /etc/xwiki/xwiki.properties
+        regexp: "oidc.endpoint.token=.*"
+        line: "oidc.endpoint.token={{ token_endpoint }}"
+        #line: "oidc.endpoint.token={{ keycloak_server_url }}/realms/{{ realm }}/protocol/openid-connect/token"
+
+    # oidc.endpoint.userinfo=https://__KEYCLOAK-ADDRESS__/auth/realms/__REALM__/protocol/openid-connect/userinfo
+    - name: Configure oidc.endpoint.userinfo
+      lineinfile: 
+        path: /etc/xwiki/xwiki.properties
+        regexp: "oidc.endpoint.userinfo=.*"
+        line: "oidc.endpoint.userinfo={{ userinfo_endpoint }}"
+        #line: "oidc.endpoint.userinfo={{ keycloak_server_url }}/realms/{{ realm }}/protocol/openid-connect/userinfo"
+
+    # oidc.scope=openid,profile,email,address
+    - name: Configure oidc.scope
+      lineinfile: 
+        path: /etc/xwiki/xwiki.properties
+        regexp: "oidc.scope=.*"
+        line: "oidc.scope=openid,profile,email,address"
+
+    - name: Configure
+      lineinfile: 
+        path: /etc/xwiki/xwiki.properties
+        regexp: "oidc.defaultClientConfiguration=.*"
+        line: "oidc.defaultClientConfiguration=default"
+
+
+    # oidc.endpoint.userinfo.method=GET
+    - name: Configure oidc.endpoint.userinfo.method
+      lineinfile: 
+        path: /etc/xwiki/xwiki.properties
+        regexp: "oidc.endpoint.userinfo.method=.*"
+        line: "oidc.endpoint.userinfo.method=GET"
+
+    # oidc.user.nameFormater=${oidc.user.preferredUsername._clean._lowerCase}
+    - name: Configure oidc.user.nameFormater
+      lineinfile: 
+        path: /etc/xwiki/xwiki.properties
+        regexp: "oidc.user.nameFormater=.*"
+        line: "oidc.user.nameFormater=${oidc.user.preferredUsername._clean._lowerCase}"
+
+    # oidc.user.subjectFormater=${oidc.user.subject}
+    - name: Configure oidc.user.subjectFormater
+      lineinfile: 
+        path: /etc/xwiki/xwiki.properties
+        regexp: "oidc.user.subjectFormater=.*"
+        line: "oidc.user.subjectFormater=${oidc.user.subject}"
+
+#    # # oidc.groups.claim=xwiki_groups
+#    # # oidc.groups.mapping=MyXWikiGroup=my-oidc-group
+#    # # oidc.groups.mapping=MyXWikiGroup2=my-oidc-group2
+#    # # oidc.groups.mapping=MyXWikiGroup2=my-oidc-group3
+#    # # oidc.groups.allowed=
+#    # # oidc.groups.forbidden=
+
+    # oidc.userinfoclaims=xwiki_user_accessibility,xwiki_user_company,xwiki_user_displayHiddenDocuments,xwiki_user_editor,xwiki_user_usertype
+    - name: Configure oidc.userinfoclaims
+      lineinfile: 
+        path: /etc/xwiki/xwiki.properties
+        regexp: "oidc.userinfoclaims=.*"
+        line: "oidc.userinfoclaims=xwiki_user_accessibility,xwiki_user_company,xwiki_user_displayHiddenDocuments,xwiki_user_editor,xwiki_user_usertype"
+
+    # # oidc.userinforefreshrate=600000
+    - name: Configure oidc.userinforefreshrate
+      lineinfile: 
+        path: /etc/xwiki/xwiki.properties
+        regexp: "oidc.userinforefreshrate=.*"
+        line: "oidc.userinforefreshrate=600000"
+
+    # oidc.clientid=__KEYCLOAK-CLIENT-ID__
+    - name: Configure oidc.clientid
+      lineinfile: 
+        path: /etc/xwiki/xwiki.properties
+        regexp: "oidc.clientid=.*"
+        line: "oidc.clientid={{ xwiki_client_id }}"
+
+    # oidc.endpoint.token.auth_method=client_secret_basic
+    # Changed this to client_secret_post and retry
+    - name: Configure oidc.endpoint.token.auth_method=client_secret_post
+      lineinfile: 
+        path: /etc/xwiki/xwiki.properties
+        regexp: "oidc.endpoint.token.auth_method=.*"
+        line: "oidc.endpoint.token.auth_method=client_secret_post"
+
+
+    # Get authentication token from token-service url
+    - name: Retrieve authentication token from token-service url
+      uri:
+        url: "{{ tokenurl.json[\"token-service\"] }}/token"
+        method: POST
+        body_format: form-urlencoded
+        validate_certs: false
+        body:
+          realm: master
+          client_id: admin-cli
+          username: "{{ kc_kc_kc_kc_adminid }}"
+          password: "{{ kc_kc_kc_kc_adminpw }}"
+          grant_type: password
+      register: authtoken
+
+    - debug:
+        var: authtoken
+
+    - debug:
+        var: authtoken.json["access_token"]  
+
+    - name: Store access token into variable for easier retrieval
+      set_fact:
+        auth_token: "{{ authtoken.json[\"access_token\"] }}"
+
+    - debug:
+        var: auth_token  
+
+    #######################################################################################
+    # Very badly documented in Keycloak: The admin RESTful API has a base path /admin/realms/
+    #######################################################################################
+    
+    # Retrieve current list of clients of our type
+    # So, this works in curl:
+    # curl -k -v -H "Accept: application/json" -H "Authorization: Bearer ${access_token}" "https://ad.onestein.lan:8443/admin/realms/master/clients" | jq .
+    - name: Retrieve current list of clients and search for already existing "{{ xwiki_client_id }} "
+      uri:
+        url: "{{ keycloak_server_url }}/admin/realms/{{ realm }}/clients?clientId={{ xwiki_client_id }}"
+        headers:
+         Accept: "application/json"
+         Authorization: "Bearer {{ auth_token }}" 
+        method: get
+        validate_certs: false
+      register: existingclient
+
+    - name: Find ID in returned json
+      debug:
+        var: existingclient.json[0].id
+
+    - name: Delete client id  "{{ xwiki_client_id }}" if it already exists.
+      # Example: "id": "ba973624-2d00-488f-8d18-154224c63f8f"
+      uri:
+        url: "{{ keycloak_server_url }}/admin/realms/{{ realm }}/clients/{{ existingclient.json[0].id }}"
+        headers:
+         Accept: "application/json"
+         Authorization: "Bearer {{ auth_token }}" 
+        method: DELETE
+        validate_certs: false
+        status_code: 204
+      when: existingclient.json[0].id is defined
+      register: deleteclient
+ 
+    - debug:
+        var: deleteclient
+
+    - name: Convert Ninja template to variable
+      set_fact:
+        jsonbody: "{{ lookup('template', 'xwiki-keycloak-sso.json.j2') }}"
+
+#   - debug:
+#       var: jsonbody
+
+    # Generate the json payload to upload
+    - name: Upload JSON template file to create new Client ID on Keycloak server
+      uri:
+        url: "{{ keycloak_server_url }}/admin/realms/{{ realm }}/clients"
+        headers:
+         Accept: "application/json"
+         Authorization: "Bearer {{ auth_token }}" #.json[\"access_token\"]  }}"
+        method: POST
+        validate_certs: false
+        body_format: json
+        body: "{{ jsonbody }}"
+        status_code: 201
+      register: createclientresult
+   
+    # Good news! Result contains location of new client id in location
+    # Example: "location": "https://ad.onestein.lan:8443/admin/realms/ONESTEIN.LAN/clients/e01a87cf-537c-441e-b6ee-17f4cd07d92c"
+    - name: If all went well we now have a locaton of the newly created Client ID
+      debug:
+        var: createclientresult.location
+
+#   # You can also search the client id using this piece of code
+#   - name: Search id of newly created client
+#     uri:
+#       url: "{{ keycloak_server_url }}/admin/realms/{{ realm }}/clients?clientId={{ xwiki_client_id }}"
+#       headers:
+#        Accept: "application/json"
+#        Authorization: "Bearer {{ auth_token }}" 
+#       method: get
+#       validate_certs: false
+#     register: client1
+#     # Example: "id": "ba973624-2d00-488f-8d18-154224c63f8f"
+   
+    # After importing this to Keycloak, you have to generate a new Client-Secret and put it into xwiki.properties under oidc.secret=__KEYCLOAK-CLIENT-SECRET__.
+    # Generate and retrieve a new Client-Secret to put into  xwiki.properties under oidc.secret=__KEYCLOAK-CLIENT-SECRET__
+    # GET /{realm}/clients/{id}/client-secret
+    - name: Retrieve secret for newly created client "{{ xwiki_client_id }} "
+      uri:
+        url: "{{ createclientresult.location }}/client-secret"
+        headers:
+         Accept: "application/json"
+         Authorization: "Bearer {{ auth_token }}" 
+        method: get
+        validate_certs: false
+      register: clientsecret
+
+    - name: Store secret for easy retrieval
+      set_fact:
+        client_secret: "{{ clientsecret.json.value }} "
+
+    # Aim is: In the end, Client-ID and Client-Secret have to match on Keycloak and in xwiki.properties.
+    # oidc.secret=__KEYCLOAK-CLIENT-SECRET__
+    
+    - name: Configure oidc.secret
+      lineinfile: 
+        path: /etc/xwiki/xwiki.properties
+        regexp: "oidc.secret=.*"
+        line: "oidc.secret={{ client_secret }}"
+
+    # After importing this to Keycloak, you have to generate a new Client-Secret and put it into xwiki.properties under oidc.secret=__KEYCLOAK-CLIENT-SECRET__.
+    # Aim is: In the end, Client-ID and Client-Secret have to match on Keycloak and in xwiki.properties.
+    #
+    - name: Enable and start tomcat9
+      service: 
+        name: tomcat9
+        state: restarted
+        enabled: yes
+
+
+    - name: Post-install message IT IS IMPORTANT TO READ THIS
+      debug:
+        msg: |  
+          ********************************************************************************************************
+          * After a fresh Xwiki installation you need to manually install (within Xwiki!) the following extension:
+          * OpenID Connect Authenticator 1.31
+          * by: Thomas Mortagne
+          *   Allow an XWiki instance to authenticate on an OpenID Connect provider
+          *
+          * Open Xwiki and install the standard flavor and create an admin user account.
+          * Login as administrator, open the menu in the upper right corner and click on Administer Wiki
+          * Open the Extensions section and select Extensions
+          * Search for OpenID Connect Authenticator and select Install on Farm
+          * Now click on Continue to do the actual install
+          * After that ssh to the server and do a systemctl restart tomcat9
+          ********************************************************************************************************
+
+ 

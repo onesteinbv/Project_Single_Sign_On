@@ -1,0 +1,25 @@
+<VirtualHost *:80>
+   ServerName wiki.{{ domain }}
+   Redirect / https://wiki.{{ domain }}
+</VirtualHost>
+
+
+<VirtualHost *:443>
+  ServerName wiki.{{ domain }}
+
+  RewriteEngine On
+  RedirectMatch ^/$  /xwiki/
+
+  CustomLog /var/log/apache2/wiki-access.log combined
+  ErrorLog  /var/log/apache2/wiki-error.log
+
+  SSLEngine on
+  SSLCertificateFile /etc/apache2/ssl/_wildcard.{{ domain }}.pem
+  SSLCertificateKeyFile /etc/apache2/ssl/_wildcard.i{{ domain }}-key.pem
+
+  SSLProxyEngine on
+  ProxyPass /xwiki/  https://wiki.{{ domain }}:8443/xwiki/
+  ProxyPassReverse /xwiki/  https://wiki.{{ domain }}:8443/xwiki/
+
+</VirtualHost>
+
