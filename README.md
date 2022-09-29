@@ -15,7 +15,7 @@ If you run into errors, please open an issue.
 
 # Documentation
 
-All applications should have their own [wiki page](wiki/) describing possible pitfalls.
+All applications should have their own [wiki page](https://github.com/onesteinbv/Project_Single_Sign_On/wiki) describing possible pitfalls.
 
 This is work in progress. We hope you will find it useful.
 If you like it, tell others. If you don't like it, tell us.
