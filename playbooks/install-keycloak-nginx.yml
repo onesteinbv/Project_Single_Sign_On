@@ -1,0 +1,252 @@
+---
+- name: Install central Keycloak Kerberos server on Ubuntu 
+  hosts: grpad
+  remote_user: root
+
+  vars:
+    keycloak_release: 19.0.1
+    keycloak_url: https://github.com/keycloak/keycloak/releases/download/
+
+  tasks:
+    - debug:
+        msg: Readable debug output  export ANSIBLE_STDOUT_CALLBACK=debug
+
+    - name: Read encrypted content
+      include_vars: encrypted-vars.yml
+
+    - name: Read global variables
+      include_vars: global-vars.yml
+
+    - name: Make sure hostname is in /etc/hosts
+      lineinfile:
+        dest: "/etc/hosts"
+        regexp: ".*\t{{ ansible_fqdn }}"
+        line: "{{ ansible_facts['default_ipv4']['address'] }}\t{{ ansible_fqdn }}\t{{ ansible_fqdn }}"
+        state: present
+
+    # Install all needed software in one go.
+    # apt install -y ca-certificates curl openssh-server
+    - name: Install all needed packages 
+      apt:
+        name: "{{ item }}"
+      loop:
+        - ca-certificates
+        - curl
+        - openssh-server
+        - mlocate
+        - chrony
+        - openjdk-11-jdk
+        - postgresql
+        - unzip
+        - net-tools
+        - python3-psycopg2
+        - autopostgresqlbackup
+        - nginx
+
+    - name: Make sure no apache2 installed
+      apt:
+        name: apache2
+        state: absent
+    
+    - name: Set timezone to Europe/Amsterdam
+      timezone:
+        name: Europe/Amsterdam
+
+    - name: "Download {{ keycloak_url }}{{ keycloak_release }}/keycloak-{{ keycloak_release }}.zip"
+      get_url:
+        url: " {{ keycloak_url }}{{ keycloak_release }}/keycloak-{{ keycloak_release }}.zip"
+        dest: "/root/keycloak-{{ keycloak_release }}.zip"
+
+    - name: Create /opt if it does not exist
+      ansible.builtin.file:
+        path: /opt
+        state: directory
+        mode: '0755'
+
+    - name: Ensure group "keycloak" exists
+      ansible.builtin.group:
+        name: keycloak
+        state: present
+        system: true
+
+    - name: Create system user 'keycloak' and primary group of 'admin'
+      ansible.builtin.user:
+        name: keycloak
+        comment: Keycloak server account
+        home: /opt/keycloak
+        create_home: no
+        group: keycloak
+        groups: syslog
+        shell: /bin/bash
+        system: true
+
+    - name: Create logfile for Keycloak
+      copy:
+        content: ""
+        dest: /var/log/keycloak.log
+        force: no
+        group: syslog
+        owner: keycloak
+        mode: 0664
+
+    - name: Create symbolic link from /opt/keycloak to /opt/
+      ansible.builtin.file:
+        src: "/opt/keycloak-{{ keycloak_release }}"
+        dest: /opt/keycloak
+        owner: keycloak
+        group: keycloak
+        state: link
+        force: yes
+
+
+    - name: Unzip Keycloak distribution zip file 
+      ansible.builtin.unarchive:
+        src: "/root/keycloak-{{ keycloak_release }}.zip"
+        dest: /opt/
+        owner: keycloak
+        group: keycloak
+        remote_src: yes
+
+    # Setup Postgresql database
+    - name: Setup Keycloak Postgresql database user
+      become: true
+      become_user: postgres
+      postgresql_user:
+        name: keycloak
+        password: 'K3yCl0@k'
+        #priv: "CONNECT"
+
+    - name: Setup Keycloak Postgresql database
+      become: true
+      become_user: postgres
+      postgresql_db: 
+        name: keycloak
+        template: 'template0'
+        owner: keycloak
+        state: present
+
+    # Install Systemd service definition
+    # TODO: file currently contains hard-coded password. Needs vault someday.
+    - name: Upload Systemd service definition
+      template: 
+        src: keycloak.service
+        dest: /etc/systemd/system/keycloak.service
+        owner: root
+        group: root
+
+    - name: Force systemd to reread configs 
+      ansible.builtin.systemd:
+        daemon_reload: yes
+
+    - name: Test if keystore already exists
+      stat:
+        path: /opt/keycloak/conf/server.keystore
+      register: keystore
+
+      ################################################################################
+      # Keycloak will only start in production mode if there are ssl keys present!!! #
+      # So even if we use a reverse proxy, we have to configure Keycloak SSL         #
+      ################################################################################
+
+    # You will thank me later: https://coderwall.com/p/3t4xka/import-private-key-and-certificate-into-java-keystore
+    - name: Export complete ssl chain into one file
+      shell:
+        cmd: "/usr/bin/openssl pkcs12 -export -in /root/_wildcard.{{ domain }}.pem  -inkey /root/_wildcard.{{ domain }}-key.pem  -chain -CAfile /root/rootCA.pem -name \"{{ domain }}\" -passout pass:secret -out /tmp/{{ domain }}.p12"
+
+    - name: Make sure tmp file can be read by user keycloak
+      file:
+        path: "/tmp/{{ domain }}.p12"
+        owner: 'keycloak'
+ 
+    - name: "Import wildcard key for {{ domain }}  into keycloak keystore file"
+      become: true
+      become_user: keycloak
+      shell:
+        cmd: "/usr/bin/keytool -importkeystore -srcstorepass secret -deststorepass secret  -destkeystore server.keystore -srckeystore /tmp/{{ domain }}.p12 -srcstoretype PKCS12"
+        chdir: /opt/keycloak/conf
+      when: keystore.stat.exists == false
+
+    - name: Initial setup Keycloak run to configure connection to PostgreSQL database
+      become: true
+      become_user: keycloak
+      shell:
+        cmd: ./kc.sh build --db postgres
+        chdir: /opt/keycloak/bin
+
+    # Normal initial startup only happens on localhost to be able to set admin userid and password
+    # Other option is to use commandline settings for initial startup to set these credentials
+    # We have to make a timeout on this
+    - name: Initial keycloak startup to set initial admin userid and password. This can take a long time because we are polling. Also, when not the first time it generates an error we will ignore.
+      become: true
+      become_user: keycloak
+      shell:
+        cmd: "KEYCLOAK_ADMIN={{ kc_adminid }} KEYCLOAK_ADMIN_PASSWORD={{ kc_adminpw }} ./kc.sh start --hostname \"{{ ansible_fqdn }}\"  --db-password 'K3yCl0@k' --db-username keycloak --db-url-database keycloak --https-key-store-password=secret"
+        chdir: /opt/keycloak/bin
+      async: 180
+      poll: 10
+      register: result
+      # IF this is not the first time we do this, the next string will appear in the output.
+      until: result.stdout is search(".*user with username exists.*")
+      # Since this will always timeout we will ignore the errors.
+      ignore_errors: yes
+
+    # Enable and start systemd keycloak service
+    - name: Configure Keycloak systemd
+      ansible.builtin.systemd:
+        name: keycloak
+        enabled: yes
+        state: restarted
+
+    - name: Make SSL dir for nginx    
+      ansible.builtin.file:
+        path: /etc/nginx/ssl
+        state: directory
+        mode: '0755'
+
+    - name: Copy SSL key and cert to nginx ssl dir
+      copy:
+        src: "files/{{ item }}"
+        dest: "/etc/nginx/ssl/{{ item }}"
+        owner: root
+        group: root
+        mode: '0600'
+      loop:  
+        - _wildcard.{{ domain }}.pem
+        - _wildcard.{{ domain }}-key.pem
+
+    - name: Install nginx reverse proxy virtualhost for Keycloak 
+      template:
+        src: "keycloak_nginx.conf.j2"
+        dest: "/etc/nginx/sites-available/keycloak"
+        owner: root
+        group: root
+        mode: '0600'
+
+    # Create symlink ln -s /etc/nginx/sites-available/keycloak.conf /etc/nginx/sites-enabled/
+    - name: Enable virtualhost in nginx
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/keycloak
+        dest:  /etc/nginx/sites-enabled/keycloak
+        owner: root
+        group: root
+        state: link
+        force: yes
+
+    # Disable default configuration by removing symlink /etc/nginx/sites-enabled/default
+    - name: Disable default nginx site config by removing a symlink
+      ansible.builtin.file:
+        path:  /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Restart nginx webserver
+      ansible.builtin.systemd:
+        name: nginx
+        enabled: yes
+        state: restarted
+
+    # We know installation works up to this point.
+    # Testing: curl -k "https://ad.onestein.lan/realms/ONESTEIN.LAN/.well-known/openid-configuration" | jq . | grep _endpoint
+
+
+
+

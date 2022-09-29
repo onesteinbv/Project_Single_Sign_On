@@ -1,0 +1,15 @@
+[Unit]
+Description=Keycloak Service
+After=network.target
+
+[Service]
+User=keycloak
+Group=keycloak
+ExecStart=/opt/keycloak/bin/kc.sh start --hostname ad.{{ domain }} --db-password 'K3yCl0@k' --db-username keycloak --db-url-database keycloak --https-key-store-password=secret --log=console,file --log-file=/var/log/keycloak.log --log-level=INFO --proxy=edge
+#ExecStart=/opt/keycloak/bin/kc.sh start --hostname ad.{{ domain  }} --db-password 'K3yCl0@k' --db-username keycloak --db-url-database keycloak --https-key-store-password=secret --log=console,file --log-file=/var/log/keycloak.log --log-level=DEBUG --proxy=edge
+WorkingDirectory=/opt/keycloak
+
+[Install]
+WantedBy=multi-user.target
+
+

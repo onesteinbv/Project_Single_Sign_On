@@ -12,7 +12,7 @@ Currently it contains playbooks for the following applications:
 - CMDBuild is being worked on
 - [Jenkins](playbooks/install-jenkins-sso.yml)
 - [Gitlab](playbooks/install-gitlab-sso.yml)
-- Keycloak (not SSO, but identity provider)
+- [Keycloak](playbooks/install-keycloak-nginx.yml) (not SSO, but the identity provider)
 - Nextcloud
 - Odoo 14
 - Odoo 15
