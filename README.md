@@ -1,4 +1,4 @@
-# Project Single Sign OnS
+# Project Single Sign On
 
 Over the past months, Onestein has sponsored the development of a set of Ansible playbooks to configure Single Sign On (SSO) for several popular open source applications.
 
