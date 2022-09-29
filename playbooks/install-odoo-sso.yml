@@ -1,0 +1,423 @@
+---
+- name: Install Odoo SSO on standard Odoo
+  hosts: grpodoo15
+  remote_user: root
+
+  # use this command line: ansible-playbook -v -i hosts install-odoo-sso.yml -u root
+  # Execute ansible-playbook playbookfile.yml -i hosts --vault-password-file .vault-password
+
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    supported_distros: "{{ ansible_distribution }} {{ ansible_distribution_major_version }}"
+    odoo_fqdn: "odoo.{{ domain }}"
+
+  tasks:
+    - debug:
+        msg: Readable debug output  export ANSIBLE_STDOUT_CALLBACK=debug
+
+    - name: Read encrypted content
+      include_vars: encrypted-vars.yml
+
+    - name: Read global variables
+      include_vars: global-vars.yml
+
+    - debug:
+        msg: |
+          *************************************************************************************
+          * We assume you have setup Odoo using the playbook at the below url
+          * https://github.com/onesteinbv/ansible-playbooks
+          * There are some rudimentory checks to check for this.
+          *************************************************************************************
+
+    - name: Check if /opt/odoo/odoo-server/odoo-bin exists
+      stat:
+        path: /opt/odoo/odoo-server/odoo-bin 
+      register: stat_odoo_bin
+
+    - name: Fail when odoo-bin not at /opt/odoo/odoo-server/odoo-bin 
+      fail:
+      when: stat_odoo_bin.stat.exists  == false
+
+    - name: Check if /opt/odoo/custom/addons is a directory
+      stat:
+        path: /opt/odoo/custom/addons
+      register: stat_custom_addon_dir
+
+    - debug:
+        var: stat_custom_addon_dir
+
+    - name: Fail when /opt/odoo/custom/addons is not an existing directory 
+      fail:
+      when: stat_custom_addon_dir.stat.exists  == false or stat_custom_addon_dir.stat.isdir == false
+
+    # Okay, this seems to be an Odoo install, but what version?
+    # odoo-bin --version > Odoo server 14.0?
+    - name: Try to determine the version of Odoo currently installed
+      become: yes
+      become_user: odoo
+      become_method: sudo
+      shell:
+        cmd: /opt/odoo/odoo-server/odoo-bin --version
+      register: installed_odoo
+
+    - name: Get the last 4 characters from version string
+      set_fact: 
+        odoo_version: "{{ installed_odoo.stdout[-4:] }}"
+
+    - debug:
+        var: odoo_version
+
+    - name: Set variable odoo_client_id to "client-odoo-{{ odoo_version }}-{{ ansible_fqdn }}"
+      set_fact:
+        odoo_client_id: "client-odoo-{{ odoo_version }}-{{ ansible_fqdn }}"
+
+    - name: Set variable odoo_client_name to "client-odoo-{{ odoo_version }}-{{ ansible_fqdn }}"
+      set_fact:
+        odoo_client_name: "client-odoo-{{ odoo_version }}-{{ ansible_fqdn }}"
+
+    # Now we start doing some stuff
+
+    # Installing needed tools
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+
+    # Install all needed software in one go.
+    - name: Install all needed packages
+      apt:
+        name: "{{ item }}"
+      loop:
+        - autopostgresqlbackup
+        - git
+        - jq
+        - unzip
+        - xmlsec1
+        - python3-pysaml2
+        - xmlstarlet
+    
+    # Original at  https://orus.io/xcg/auth_saml 
+    # These days at https://github.com/OCA/server-auth/tree/{{ odoo_version }}/auth_saml
+    - name: checkout OCA repo server-auth branch "{{ odoo_version }}" to temporary storage directory
+      ansible.builtin.git:
+        repo: 'https://github.com/OCA/server-auth/'
+        dest: /root/server-auth
+        version: "{{ odoo_version }}"
+
+    - name: Copy only auth_saml part to Odoo custom addon directory
+      shell:
+        cmd: cp -av /root/server-auth/auth_saml /opt/odoo/custom/addons/.
+
+    - name: Change ownership of copied files to odoo user and group
+      shell:
+        cmd: chown -R odoo:odoo /opt/odoo/custom/addons/.
+
+    - name: Restart Odoo server to make sure the new module is available in the app store.
+      systemd:
+        name: odoo-server
+        state: restarted
+
+    # Copy ssl keys to fix nginx
+    - name: Make SSL dir for nginx    
+      ansible.builtin.file:
+        path: /etc/nginx/ssl
+        state: directory
+        mode: '0755'
+
+    - name: Copy SSL key and cert to apache ssl dir
+      copy:
+        src: "files/{{ item }}"
+        dest: "/etc/nginx/ssl/{{ item }}"
+        owner: root
+        group: root
+        mode: '0600'
+      loop:  
+        - _wildcard.{{ domain }}.pem
+        - _wildcard.{{ domain }}-key.pem
+
+    - name: UFW - Allow HTTPS
+      ufw:
+        rule: allow
+        port: "443"
+
+    # Now create a client on the Keycloak server for this
+    # Retrieve some saml info from our Keycloak server
+    # We can create a SAML client at the Keycloak side.  And use REST to
+    # configure at the CMDBuild side.
+
+    ####################################################    
+    # Create a SAML client at the Keycloak side.
+    ####################################################    
+     
+    # Generate a key on the odoo server
+    - name: Generate key on odoo server
+      shell:
+        cmd: /usr/bin/openssl req -x509 -sha256 -newkey rsa:2048 -keyout sp.key -out sp.crt -days 3650 -nodes -subj "/CN={{ domain }}"
+        chdir: /tmp
+
+    # Start getting auth token      
+    # Retrieve token url needed.  Returns JSON payload with var token-service.
+    - name: Retrieve token url from server
+      uri:
+        url: "{{ keycloak_server_url }}/realms/master"
+        validate_certs: false
+      register: tokenurl
+
+    - debug:
+        var: tokenurl.json["token-service"] 
+
+    - name: Store url for easier retrieval
+      set_fact:
+        token_url: "{{ tokenurl.json[\"token-service\"] }}"
+
+    # Call info endpoint 
+    - name: "Retrieve endpoint info for our realm {{ realm }}"
+      uri:
+        url: "{{ keycloak_server_url }}/realms/{{ realm }}/.well-known/openid-configuration"
+        validate_certs: false
+      register: endpointinfo
+
+    - debug:
+        var: endpointinfo
+   
+    - name: Store authorization_endpoint for faster retrieval
+      set_fact:
+        authorization_endpoint: "{{ endpointinfo.json[\"authorization_endpoint\"] }}"
+
+    # "authorization_endpoint": "https://ad.onestein.lan/realms/ONESTEIN.LAN/protocol/openid-connect/auth",
+    - debug:
+        var: authorization_endpoint
+
+    - name: Store token_endpoint for faster retrieval
+      set_fact:
+        token_endpoint: "{{ endpointinfo.json[\"token_endpoint\"] }}"
+    - debug:
+        var: token_endpoint
+
+    - name: Store userinfo_endpoint for faster retrieval
+      set_fact:
+        userinfo_endpoint: "{{ endpointinfo.json[\"userinfo_endpoint\"] }}"
+    - debug:
+        var: userinfo_endpoint
+
+    # Get authentication token from token-service url
+    - name: Retrieve authentication token from token-service url
+      uri:
+        url: "{{ tokenurl.json[\"token-service\"] }}/token"
+        method: POST
+        body_format: form-urlencoded
+        validate_certs: false
+        body:
+          realm: master
+          client_id: admin-cli
+          username: "{{ kc_adminid }}"
+          password: "{{ kc_adminpw }}"
+          grant_type: password
+      register: authtoken
+
+    - debug:
+        var: authtoken
+
+    - debug:
+        var: authtoken.json["access_token"]  
+
+    - name: Store access token into variable for easier retrieval
+      set_fact:
+        auth_token: "{{ authtoken.json[\"access_token\"] }}"
+
+    - debug:
+        var: auth_token  
+
+    # Retrieve IDP metadata descriptor and copy the 509 formatted certificate
+    # https://ad.onestein.lan/realms/ONESTEIN.LAN/protocol/saml/descriptor
+    - name: Retrieve IDP metadata descriptor to use the 509 formatted certificate
+      uri:
+        url: "{{ keycloak_server_url }}/realms/{{ realm }}/protocol/saml/descriptor"
+#       headers:
+#         Accept: "application/json"
+#         Authorization: "Bearer {{ auth_token }}" 
+        method: get
+        validate_certs: false
+        return_content: yes  
+      register: idp_metadata
+
+    - debug:
+        var: idp_metadata
+
+# Please do not go down this road and stay sane...
+#   - xml:
+#       xmlstring: "{{ idp_metadata.content }}"
+#       xpath: /listResponse/instance
+#       xpath: /md:EntityDescriptor/md:IDPSSODescriptor/md:KeyDescriptor/ds:KeyInfo/ds:X509Data/ds:X509Certificate
+#       content: attribute
+#     register: instance_attributes
+
+    # We are going to save the XML metadate for shell processing    
+    - name: Save IDP XML metadata to file for processing
+      copy:
+        content: "{{  idp_metadata.content }}" 
+        dest: /tmp/idp.xml
+
+    # We are going to use a shell command to retrieve the value for X509Certificate    
+    - name: Run xmlstarlet to retrieve X509Certificate
+      shell:
+        cmd: /usr/bin/xmlstarlet sel -t -v //ds:X509Certificate /tmp/idp.xml
+      register: xmlstarlet
+
+    - debug:
+        var: xmlstarlet
+
+    - name: Store output in certificate variable
+      set_fact:
+        idp_crt: "{{ xmlstarlet.stdout }}"
+
+    - name: Download SP key and cert to local system
+      ansible.builtin.fetch:
+        src: "/tmp/{{ item }}"
+        dest: "/tmp/"
+        flat: yes
+      loop:
+        - sp.crt
+        - sp.key
+
+    - name: Remove first line from tmp files
+      lineinfile:
+        path: "/tmp/{{ item }}"
+        regexp: '^-----(BEGIN|END).*-----$'
+        state: absent
+      loop:
+        - sp.crt
+        - sp.key
+
+    - name: Retrieve remote ssl cert
+      shell:
+        cmd: cat  /tmp/sp.crt  |  tr -d '\n'
+      register: sp_crt
+
+    - debug:
+        var: sp_crt
+
+    - name: Retrieve remote ssl key
+      shell:
+        cmd: cat  /tmp/sp.key  |  tr -d '\n'
+      register: sp_key
+
+    - debug:
+        var: sp_key
+
+    - name: Overwrite current nginx configuration
+      template:
+        src: odoo-nginx-odoo.j2
+        dest: /etc/nginx/sites-available/odoo
+        force: yes
+
+    - name: Restart Nginx
+      systemd:
+        name: nginx
+        state: restarted
+
+    # Retrieve current list of clients of our type
+    # So, this works in curl:
+    # curl -k -v -H "Accept: application/json" -H "Authorization: Bearer ${access_token}" "https://ad.onestein.lan:8443/admin/realms/master/clients" | jq .
+    - name: Retrieve current list of clients and search for already existing "{{ odoo_client_id }} "
+      uri:
+        url: "{{ keycloak_server_url }}/admin/realms/{{ realm }}/clients?clientId={{ odoo_client_id }}"
+        headers:
+          Accept: "application/json"
+          Authorization: "Bearer {{ auth_token }}" 
+        method: get
+        validate_certs: false
+      register: existingclient
+
+    - name: Returned json
+      debug:
+        var: existingclient
+
+#   - name: Copy currently existing client definition to backup file in JSON format.
+#     copy:
+#      content: "{{ existingclient }}"
+#      dest: /tmp/odoo-original-client-backup.json
+
+    - name: Find ID in returned json
+      debug:
+        var: existingclient.json[0].id
+
+    - name: Delete client id  "{{ odoo_client_id }}" if it already exists.
+      # Example: "id": "ba973624-2d00-488f-8d18-154224c63f8f"
+      uri:
+        url: "{{ keycloak_server_url }}/admin/realms/{{ realm }}/clients/{{ existingclient.json[0].id }}"
+        headers:
+         Accept: "application/json"
+         Authorization: "Bearer {{ auth_token }}" 
+        method: DELETE
+        validate_certs: false
+        status_code: 204
+      when: existingclient.json[0].id is defined
+      register: deleteclient
+ 
+    - debug:
+        var: deleteclient
+
+    - name: Convert Ninja template to variable
+      set_fact:
+        jsonbody: "{{ lookup('template', 'odoo-keycloak-sso.json.j2') }}"
+
+    - debug:
+        var: jsonbody
+
+    - name: For debugging store json var in local file
+      copy:
+        content: "{{ jsonbody }}"
+        dest: /tmp/odoo-new-client-backup.json
+
+   # Generate the json payload to upload
+    - name: Upload JSON template file to create new Client ID on Keycloak server
+      uri:
+        url: "{{ keycloak_server_url }}/admin/realms/{{ realm }}/clients"
+        headers:
+          Accept: "application/json"
+          Authorization: "Bearer {{ auth_token }}" #.json[\"access_token\"]  }}"
+        method: POST
+        validate_certs: false
+        body_format: json
+        body: "{{ jsonbody }}"
+        status_code: 201
+      register: createclientresult
+   
+    # Good news! Result contains location of new client id in location
+    # Example: "location": "https://ad.onestein.lan:8443/admin/realms/ONESTEIN.LAN/clients/e01a87cf-537c-441e-b6ee-17f4cd07d92c"
+    - name: If all went well we now have a locaton of the newly created Client ID
+      debug:
+        var: createclientresult.location
+
+    - debug:
+        msg: |
+          *************************************************************************************
+          * Log in your Odoo server at "https://{{ ansible_fqdn }}" and install the 'auth_saml' module in the apps module.
+          * Configure as follows
+          * - In Odoo go to "Apps".
+          * - Add the text "?debug=1" before the "#" in the URL and do a reload of the page.
+          * - Select menu option "Update Apps List"
+          * - In Odoo go to Settings > Users & Companies > SAML Providers
+          * - Create a new provider
+          * - Paste the following block of text (without the enclosing quotes) into the Identity Provider Metadata field
+          -
+          "{{ idp_metadata.content }}"
+          -
+          * - In the Identity Provider field enter the value "userid" !!!
+          * - Make sure Entity ID contains the value "{{ odoo_client_id }}" !!!!
+          * - Click on "Upload your file" next to "Odoo Public Certificate" and upload the "sp.crt" file you will see in /tmp.
+          * - If, after selecting and clicking "Ok" the upload button does not change into a field with the filename in it, you have to use a different browser!
+          * - Click on "Upload your file" next to "Odoo Private Key" and upload the "sp.key" file you will see in /tmp.
+          * - Again, if, after selecting and clicking "Ok" the upload button does not change into a field with the filename in it, you have to use a different browser!
+          * - For "Signature Algorythm" you select "SIG_RSA_SHA256"
+          * - Alle checkboxen aanvinken behalve "Want Assertions Signed".
+          * - Zoek in keycloak het userid op van een gebruiker (lijkt op "1513d874-2a7e-4f05-87a3-9f101302aa81".
+          * - Ga in Odoo naar Settings > Users & Companies > Users
+          * - Maak gebruiker aan en open het tabblad "SAML".
+          * - Voeg een regel toe, kies de geconfigureerde SAML backend en vul het SAML userid toe.
+          *************************************************************************************
+
+
+
+
+
