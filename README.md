@@ -14,7 +14,7 @@ Currently it contains playbooks for the following applications:
 - Nextcloud
 - Odoo 14
 - Odoo 15
-- Xwiki
+- [Xwiki](playbooks/install-xwiki-sso.yml)
 - Zabbix
 
 These Ansible playbooks do not use roles or other advanced stuff.
