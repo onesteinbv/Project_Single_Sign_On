@@ -18,7 +18,7 @@
       include_vars: encrypted-vars.yml
 
     - name: Read global variables
-      include_vars: vars.yml
+      include_vars: global-vars.yml
 
     - name: Download Xwiki  repo key
       # sudo wget https://maven.xwiki.org/xwiki-keyring.gpg -P /usr/share/keyrings/
