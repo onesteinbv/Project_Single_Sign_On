@@ -1,0 +1,87 @@
+{
+  "access": {
+    "configure": true,
+    "manage": true,
+    "view": true
+  },
+  "baseUrl": "{{ zabbix_server_url }}",
+  "adminUrl": "{{ zabbix_server_url }}/index_sso.php?acs",
+  "alwaysDisplayInConsole": false,
+  "attributes": {
+    "acr.loa.map": "{}",
+    "backchannel.logout.revoke.offline.tokens": "false",
+    "backchannel.logout.session.required": "false",
+    "client.secret.creation.time": "1659538145",
+    "client_credentials.use_refresh_token": "false",
+    "display.on.consent.screen": "false",
+    "exclude.session.state.from.auth.response": "false",
+    "frontchannel.logout.session.required": "false",
+    "id.token.as.detached.signature": "false",
+    "oauth2.device.authorization.grant.enabled": "false",
+    "oidc.ciba.grant.enabled": "false",
+    "require.pushed.authorization.requests": "false",
+    "saml.allow.ecp.flow": "false",
+    "saml.artifact.binding": "false",
+    "saml.artifact.binding.identifier": "{{ lookup('community.general.random_string', length=20) | b64encode }}",
+    "saml.assertion.signature": "false",
+    "saml.authnstatement": "true",
+    "saml.client.signature": "false",
+    "saml.encrypt": "false",
+    "saml.force.post.binding": "true",
+    "saml.multivalued.roles": "false",
+    "saml.onetimeuse.condition": "false",
+    "saml.server.signature": "true",
+    "saml.server.signature.keyinfo.ext": "false",
+    "saml.signature.algorithm": "RSA_SHA256",
+    "saml.signing.certificate": "{{ sp_crt.stdout }}",
+    "saml.signing.private.key": "{{ sp_key.stdout }}",
+    "saml_force_name_id_format": "true",
+    "saml_name_id_format": "email",
+    "saml_signature_canonicalization_method": "http://www.w3.org/2001/10/xml-exc-c14n#",
+    "saml_single_logout_service_url_redirect": "{{ zabbix_server_url }}/index_sso.php?sls",
+    "tls.client.certificate.bound.access.tokens": "false",
+    "token.response.type.bearer.lower-case": "false",
+    "use.refresh.tokens": "true"
+  },
+  "authenticationFlowBindingOverrides": {},
+  "bearerOnly": false,
+  "clientAuthenticatorType": "client-secret",
+  "clientId": "{{ zabbix_client_id }}",
+  "name": "{{ zabbix_client_name }}",
+  "consentRequired": false,
+  "defaultClientScopes": [
+    "role_list"
+  ],
+  "directAccessGrantsEnabled": false,
+  "enabled": true,
+  "frontchannelLogout": true,
+  "fullScopeAllowed": true,
+  "id": "e8383d74-d07d-4485-9661-2471f0187260",
+  "implicitFlowEnabled": false,
+  "nodeReRegistrationTimeout": -1,
+  "notBefore": 0,
+  "optionalClientScopes": [],
+  "protocol": "saml",
+  "protocolMappers": [
+    {
+      "config": {
+        "attribute.name": "zabbixuser",
+        "friendly.name": "zabbixuser",
+        "user.attribute": "zabbixuser"
+      },
+      "consentRequired": false,
+      "id": "{{ lookup('community.general.random_string', length=20) | to_uuid }}",
+      "name": "zabbixuser",
+      "protocol": "saml",
+      "protocolMapper": "saml-user-attribute-mapper"
+    }
+  ],
+  "publicClient": false,
+  "redirectUris": [
+    "{{ zabbix_server_url }}/*"
+  ],
+  "serviceAccountsEnabled": false,
+  "standardFlowEnabled": true,
+  "surrogateAuthRequired": false,
+  "webOrigins": []
+}
