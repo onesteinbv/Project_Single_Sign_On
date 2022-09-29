@@ -16,7 +16,7 @@ Currently it contains playbooks for the following applications:
 - [Nextcloud](playbooks/install-nextcloud-sso.yml)
 - [Odoo ](install-odoo-sso.yml). Currently tested with Odoo CE version 14 and 15.
 - [Xwiki](playbooks/install-xwiki-sso.yml)
-- Zabbix
+- [Zabbix](install-zabbix-server-sso.yml)
 
 These Ansible playbooks do not use roles or other advanced stuff.
 They are as 'flat' as possible so that a sysadmin can easily read how they work and what they do.
