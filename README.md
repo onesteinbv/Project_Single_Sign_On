@@ -13,7 +13,7 @@ Currently it contains playbooks for the following applications:
 - [Jenkins](playbooks/install-jenkins-sso.yml)
 - [Gitlab](playbooks/install-gitlab-sso.yml)
 - [Keycloak](playbooks/install-keycloak-nginx.yml) (not SSO, but the identity provider)
-- Nextcloud
+- [Nextcloud](playbooks/install-nextcloud-sso.yml)
 - Odoo 14
 - Odoo 15
 - [Xwiki](playbooks/install-xwiki-sso.yml)

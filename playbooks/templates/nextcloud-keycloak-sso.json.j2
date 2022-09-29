@@ -1,0 +1,125 @@
+{
+  "clientId": "{{ nextcloud_client_id }}",
+  "name": "{{ nextcloud_client_name }}",
+  "description": "The Client ID for nextcloud MUST BE THIS URL!",
+  "baseUrl": "{{ nextcloud_server_url }}/",
+  "adminUrl": "{{ nextcloud_server_url }}/apps/user_saml/saml/acs",
+  "surrogateAuthRequired": false,
+  "enabled": true,
+  "alwaysDisplayInConsole": false,
+  "clientAuthenticatorType": "client-secret",
+  "redirectUris": [
+    "{{ nextcloud_server_url }}/*"
+  ],
+  "webOrigins": [],
+  "notBefore": 0,
+  "bearerOnly": false,
+  "consentRequired": false,
+  "standardFlowEnabled": true,
+  "implicitFlowEnabled": false,
+  "directAccessGrantsEnabled": false,
+  "serviceAccountsEnabled": false,
+  "publicClient": false,
+  "frontchannelLogout": true,
+  "protocol": "saml",
+  "attributes": {
+    "saml.force.post.binding": "true",
+    "saml.multivalued.roles": "false",
+    "frontchannel.logout.session.required": "false",
+    "oauth2.device.authorization.grant.enabled": "false",
+    "backchannel.logout.revoke.offline.tokens": "false",
+    "saml.server.signature.keyinfo.ext": "false",
+    "use.refresh.tokens": "true",
+    "saml.signing.certificate": "{{ sp_crt.stdout }}",
+    "oidc.ciba.grant.enabled": "false",
+    "backchannel.logout.session.required": "false",
+    "saml.signature.algorithm": "RSA_SHA256",
+    "client_credentials.use_refresh_token": "false",
+    "saml.client.signature": "false",
+    "require.pushed.authorization.requests": "false",
+    "saml.allow.ecp.flow": "false",
+    "saml.assertion.signature": "false",
+    "id.token.as.detached.signature": "false",
+    "client.secret.creation.time": "1660571048",
+    "saml.encrypt": "false",
+    "saml_assertion_consumer_url_post": "{{ nextcloud_server_url }}/apps/user_saml/saml/acs",
+    "saml.server.signature": "true",
+    "exclude.session.state.from.auth.response": "false",
+    "saml.artifact.binding.identifier": "{{ lookup('community.general.random_string', length=20) | b64encode }}",
+    "saml_single_logout_service_url_redirect": "{{ nextcloud_server_url }}/apps/user_saml/saml/sls",
+    "saml.artifact.binding": "false",
+    "saml_force_name_id_format": "false",
+    "tls.client.certificate.bound.access.tokens": "false",
+    "acr.loa.map": "{}",
+    "saml.authnstatement": "true",
+    "display.on.consent.screen": "false",
+    "saml_name_id_format": "username",
+    "saml.signing.private.key": "{{ sp_key.stdout }}",
+    "token.response.type.bearer.lower-case": "false",
+    "saml_signature_canonicalization_method": "http://www.w3.org/2001/10/xml-exc-c14n#",
+    "saml.onetimeuse.condition": "false"
+  },
+  "authenticationFlowBindingOverrides": {},
+  "fullScopeAllowed": true,
+  "nodeReRegistrationTimeout": -1,
+  "protocolMappers": [
+    {
+      "id": "{{ lookup('community.general.random_string', length=20) | to_uuid }}",
+      "name": "email",
+      "protocol": "saml",
+      "protocolMapper": "saml-user-property-mapper",
+      "consentRequired": false,
+      "config": {
+        "attribute.nameformat": "Basic",
+        "user.attribute": "email",
+        "attribute.name": "email"
+      }
+    },
+    {
+      "id": "{{ lookup('community.general.random_string', length=20) | to_uuid }}",
+      "name": "Roles",
+      "protocol": "saml",
+      "protocolMapper": "saml-role-list-mapper",
+      "consentRequired": false,
+      "config": {
+        "single": "true",
+        "attribute.nameformat": "Basic",
+        "friendly.name": "roles",
+        "attribute.name": "Roles"
+      }
+    },
+    {
+      "id": "{{ lookup('community.general.random_string', length=20) | to_uuid }}",
+      "name": "nextcloudquota",
+      "protocol": "saml",
+      "protocolMapper": "saml-user-property-mapper",
+      "consentRequired": false,
+      "config": {
+        "attribute.nameformat": "Basic",
+        "user.attribute": "nextcloudquota",
+        "attribute.name": "nextcloudquota"
+      }
+    },
+    {
+      "id": "{{ lookup('community.general.random_string', length=20) | to_uuid }}",
+      "name": "username",
+      "protocol": "saml",
+      "protocolMapper": "saml-user-property-mapper",
+      "consentRequired": false,
+      "config": {
+        "attribute.nameformat": "Basic",
+        "user.attribute": "username",
+        "attribute.name": "username"
+      }
+    }
+  ],
+  "defaultClientScopes": [
+    "role_list"
+  ],
+  "optionalClientScopes": [],
+  "access": {
+    "view": true,
+    "configure": true,
+    "manage": true
+  }
+}
