@@ -1,0 +1,389 @@
+---
+- name: Install basic BitWarden on server with https, no SSO config.
+  hosts: grpbitwarden
+  remote_user: root
+
+
+  # Playbook to install bitwarden password server package on host.
+  # Execute: ansible-playbook install-bitwarden-sso.yml -i hosts --vault-password-file .vault-password
+
+  vars:
+    root_ca_path: /usr/local/share/ca-certificates/mkcert_development_CA_62268663181785622328732999788222374785.crt
+    bitwarden_server_url: "https://password.{{ domain }}"
+    bitwarden_client_id: "{{ bitwarden_server_url }}/sso/saml2"
+    bitwarden_client_name: "client-bitwarden-{{ ansible_fqdn }}"
+    bitwarden_client_id: "client-bitwarden-{{ ansible_fqdn }}"
+    bitwarden_server_url: "https://password.{{ domain }}"
+
+  tasks:
+  - name: test connection to host
+    ping:
+
+  - name: Read encrypted content
+    include_vars: encrypted-vars.yml
+
+  - name: Set variable bitwarden_client_id to "client-bitwarden-{{ ansible_fqdn }}"
+    set_fact:
+      bitwarden_client_id: "client-bitwarden-{{ ansible_fqdn }}"
+
+  - name: Set variable xwiki_client_name to "client-bitwarden-{{ ansible_fqdn }}"
+    set_fact:
+
+  - name: Set timezone to Europe/Amsterdam
+    timezone:
+      name: Europe/Amsterdam
+
+  # Add docker key
+  # curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+  - name: Add docker key
+    apt_key:
+      url: https://download.docker.com/linux/ubuntu/gpg
+      state: present
+
+  # Add docker repo
+  # sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+  - name: Add docker repo
+    shell:
+      cmd: add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+
+  #
+  # apt update
+  # sudo apt-get install apt-transport-https ca-certificates curl gnupg-agent software-properties-common
+  # sudo apt install docker-ce docker-ce-cli containerd.io docker-compose
+  - name: Install needed packages
+    apt:
+      name: "{{ item }}"
+      state: present
+    loop:
+      - apt-transport-https 
+      - ca-certificates 
+      - curl 
+      - gnupg-agent 
+      - software-properties-common
+      - docker-ce 
+      - docker-ce-cli 
+      - containerd.io 
+      - docker-compose
+      - python3-pexpect
+      - unzip
+
+
+  # Create a user to run Bitwarden. Use bash as the default terminal and /opt/bitwarden as the home directory.
+
+  #$ sudo useradd -s /bin/bash -d /opt/bitwarden bitwarden
+  #  Add user bitwarden to group docker so it can access Docker.
+  #$ sudo mkdir -p /opt/bitwarden
+  - name: Create a user to run Bitwarden.
+    user:
+      name: bitwarden
+      shell: /bin/bash
+      home: /opt/bitwarden
+      groups: docker  
+
+  # Make dir for SSL keys
+  - name: Make SSL dir for keys
+    become: yes
+    become_user: bitwarden
+    become_method: sudo
+    shell:
+      cmd: "mkdir -p /opt/bitwarden/bwdata/ssl/self/{{ ansible_fqdn }}"
+
+# - name: Copy SSL key and cert to "/etc/nginx/ssl/self/{{ ansible_fqdn }}" for later use
+#   copy:
+#     src: "files/{{ item }}"
+#     dest: "/etc/nginx/ssl/self/{{ ansible_fqdn }}/{{ item }}"
+#     owner: bitwarden
+#     group: bitwarden
+#     mode: '0600'
+#   loop:  
+#     - _wildcard.{{ domain }}.pem
+#     - _wildcard.{{ domain }}-key.pem
+
+  #$ sudo chown bitwarden: /opt/bitwarden
+  #$ sudo chmod 700 /opt/bitwarden
+
+  #Switch to the new user.
+  #$ sudo su - bitwarden
+  #2. Install Bitwarden Server
+  #Download the official Bitwarden deployment script:
+  #$ wget -O bitwarden.sh https://go.btwrdn.co/bw-sh
+  #$ chmod +x bitwarden.sh
+  - name: Download bitwarden install script in homedir of bitwarden user
+    get_url:
+      url: https://go.btwrdn.co/bw-sh
+      dest: /opt/bitwarden/bitwarden.sh
+      owner: bitwarden
+      group: bitwarden
+      mode: '0755'
+
+  # Check if /opt/bitwarden/bwdata/ exists
+  - name: Check if /opt/bitwarden/bwdata/ already exists
+    stat:
+      path: "/opt/bitwarden/bwdata/"
+    register: bwdata_dir_stat
+
+  - name: Is /opt/bitwarden/bwdata/ already present?
+    debug:
+      msg: "/opt/bitwarden/bwdata/ already present" 
+    when: bwdata_dir_stat.stat.exists
+
+  - name: Download extra Bitwarden CLI tool
+    get_url:
+      url: "https://vault.bitwarden.com/download/?app=cli&platform=linux"
+      dest: /tmp/bw-cli.zip
+      owner: bitwarden
+      group: bitwarden
+      mode: '0644'
+
+  - name: Unpack Bitwarden CLI tool
+    ansible.builtin.unarchive:
+      src: "/tmp/bw-cli.zip"
+      dest: /opt/bitwarden
+      owner: bitwarden
+      group: bitwarden
+      remote_src: yes
+
+  - name: make Bitwarden CLI tool executable
+    file:
+      path: /opt/bitwarden/bw
+      owner: bitwarden
+      group: bitwarden
+      mode: '0755'
+
+
+  # If not present we now need to run the install script.
+  # $ ./bitwarden.sh install
+  #
+  # Use the form at https://bitwarden.com/host/ to request your private Installation Id and Installation Key for self-hosting Bitwarden.
+  # The Installation Id and Key are applied during installation of your Bitwarden instance and stored here: ./bwdata/env/global.override.env 
+  # You should use a unique id and key for each Bitwarden installation.
+  # INSTALLATION ID: 8c7729c8-a13e-4110-ae36-ae52008c2724
+  # INSTALLATION KEY: oslnBjE2l0WtcEvD9VcJ
+  # Run the install script
+  #  _     _ _                         _            
+  # | |__ (_) |___      ____ _ _ __ __| | ___ _ __  
+  # | '_ \| | __\ \ /\ / / _` | '__/ _` |/ _ \ '_ \ 
+  # | |_) | | |_ \ V  V / (_| | | | (_| |  __/ | | |
+  # |_.__/|_|\__| \_/\_/ \__,_|_|  \__,_|\___|_| |_|
+  # 
+  # Open source password management solutions
+  # Copyright 2015-2022, 8bit Solutions LLC
+  # https://bitwarden.com, https://github.com/bitwarden
+  # 
+  # ===================================================
+  # 
+  # bitwarden.sh version 2022.8.4
+  # Docker version 20.10.17, build 100c701
+  # docker-compose version 1.25.0, build unknown
+  # 
+  # (!) Enter the domain name for your Bitwarden instance (ex. bitwarden.example.com): password.onestein.lan
+  # 
+  # (!) Do you want to use Let's Encrypt to generate a free SSL certificate? (y/n): n
+  # 
+  # (!) Enter the database name for your Bitwarden instance (ex. vault): vault
+  # 
+  # 2022.8.4: Pulling from bitwarden/setup
+  # 1efc276f4ff9: Pull complete 
+  # e5aeae5c9ad4: Pull complete 
+  # 9d8b4edc672a: Pull complete 
+  # 67bb3a123350: Pull complete 
+  # 4b31f33ff8ee: Pull complete 
+  # 8302c6d93c2f: Pull complete 
+  # 64c1ff0e03a3: Pull complete 
+  # 289e8b648bb1: Pull complete 
+  # c706fe453135: Pull complete 
+  # 6b18bfe90415: Pull complete 
+  # Digest: sha256:257317606bad7b6c06755c81e4f61099b4af8b89829d7a9a2688545b92daa45f
+  # Status: Downloaded newer image for bitwarden/setup:2022.8.4
+  # docker.io/bitwarden/setup:2022.8.4
+  # 
+  # (!) Enter your installation id (get at https://bitwarden.com/host): 8c7729c8-a13e-4110-ae36-ae52008c2724
+  # 
+  # (!) Enter your installation key: oslnBjE2l0WtcEvD9VcJ
+  # 
+  # (!) Do you have a SSL certificate to use? (y/n): y
+  # 
+  # !!!!!!!!!! NOTE !!!!!!!!!!
+  # Make sure 'certificate.crt' and 'private.key' are provided in the 
+  # appropriate directory before running 'start' (see docs for info).
+  # 
+  # (!) Is this a trusted SSL certificate (requires ca.crt, see docs)? (y/n): y
+  # 
+  # Generating key for IdentityServer.
+  # Generating a RSA private key
+  # ...................................................................................++++
+  # .................++++
+  # writing new private key to 'identity.key'
+  # -----
+  # 
+  # Building nginx config.
+  # Building docker environment files.
+  # Building docker environment override files.
+  # Building FIDO U2F app id.
+  # Building docker-compose.yml.
+  # 
+  # Installation complete
+  # 
+  # If you need to make additional configuration changes, you can modify
+  # the settings in `./bwdata/config.yml` and then run:
+  # `./bitwarden.sh rebuild` or `./bitwarden.sh update`
+  # 
+  # Next steps, run:
+  # `./bitwarden.sh start`
+  - name: Run the install script
+    become: yes
+    become_user: bitwarden
+    become_method: sudo
+    ansible.builtin.expect:
+      command: /opt/bitwarden/bitwarden.sh install
+      chdir: /opt/bitwarden
+      timeout: 120
+      echo: yes
+      responses:
+        "Enter the domain name for your Bitwarden instance": "{{ ansible_fqdn }}"
+        "Do you want to use Let's Encrypt to generate a free SSL certificate":  n
+        "Enter the database name for your Bitwarden instance": vault
+        "Enter your installation id": "{{ bitwarden_installation_id }}"
+        "Enter your installation key": "{{ bitwarden_installation_key }}"
+        "Do you have a SSL certificate to use": y
+        "Is this a trusted SSL certificate": y
+    ignore_errors: yes
+
+  # Make dir for BitWarden SSL keys
+  - name: Make SSL dir for keys
+    become: yes
+    become_user: bitwarden
+    become_method: sudo
+    shell:
+      cmd: "mkdir -p /opt/bitwarden/bwdata/ssl/self/{{ ansible_fqdn }}"
+
+
+  # Use an Existing SSL Certificate
+  #
+  # You may alternatively opt to use an existing SSL Certificate, which will
+  # require you to have the following files:
+  #
+  #    A Server Certificate (certificate.crt)
+  #    A Private Key (private.key)
+  #    A CA Certificate (ca.crt)
+  #
+  # You may need to bundle your primary certificate with Intermediate CA
+  # certificates to prevent SSL trust errors. All certificates should be
+  # included in the Server Certificate file when using a CA Certificate. The
+  # first certificate in the file should be your Server Certificate, followed by
+  # any Intermediate CA certificate(s), followed by the Root CA.
+  #
+  # Under the default configuration, place your files in
+  # ./bwdata/ssl/your.domain. You may specify a different location for your
+  # certificate files by editing the following values in ./bwdata/config.yml:
+  #
+  # ssl_certificate_path: <path> 
+  # ssl_key_path: <path> 
+  # ssl_ca_path: <path>
+  #
+  # Make sure SSL filenames are correct
+  # ssl_certificate_path: /etc/ssl/self/password.onestein.lan/certificate.crt
+  # Note: Path uses the container's ssl directory. The `./ssl` host directory is mapped to
+  # `/etc/ssl` within the container.
+  # ssl_key_path: /etc/ssl/self/password.onestein.lan/private.key
+  # Note: Path uses the container's ssl directory. The `./ssl` host directory is mapped to
+  # `/etc/ssl` within the container.
+  # ssl_ca_path: 
+  # Note: Path uses the container's ssl directory. The `./ssl` host directory is mapped to
+  - name: Copy current SSL cert to correct directory ("/bwdata/ssl/{{ ansible_fqdn }}/"
+    become: yes
+    become_user: bitwarden
+    become_method: sudo
+    copy:
+      src: "files/_wildcard.{{ domain }}.pem"
+      dest: "/opt/bitwarden/bwdata/ssl/{{ ansible_fqdn }}/certificate.crt"
+
+  - debug:
+      msg:  "/opt/bitwarden/bwdata/ssl/{{ ansible_fqdn }}/certificate.crt"
+
+# Bitwarden NGINX borkt hierop
+# - name: Append current CA to certificate
+#   shell:
+#     cmd: cat "{{ root_ca_path }}" >> "/opt/bitwarden/bwdata/ssl/{{ ansible_fqdn }}/certificate.crt"
+
+  - name: Copy current SSL key to correct directory "bwdata/ssl/{{ ansible_fqdn }}/"
+    become: yes
+    become_user: bitwarden
+    become_method: sudo
+    copy:
+      src: "files/_wildcard.{{ domain }}-key.pem"
+      dest: "/opt/bitwarden/bwdata/ssl/{{ ansible_fqdn }}/private.key"
+
+  - debug:
+      msg:  "/opt/bitwarden/bwdata/ssl/{{ ansible_fqdn }}/private.key"
+
+  - name: Copy CA certificate file key to correct directory
+    become: yes
+    become_user: bitwarden
+    become_method: sudo
+    copy:
+      src: "{{ root_ca_path }}"
+      remote_src: yes
+      dest: "/opt/bitwarden/bwdata/ssl/{{ ansible_fqdn }}/ca.crt"
+
+  - debug:
+      msg:  "/opt/bitwarden/bwdata/ssl/{{ ansible_fqdn }}/ca.crt"
+
+  # TODO Next steps, run:
+  # `./bitwarden.sh start` 
+  # 3. Configure the Environment
+  # Run ./bitwarden.sh start to start the Bitwarden Server.
+  # Note: Some Bitwarden features are not configured by the bitwarden.sh installer, and must be configured in the environment file, located at ./bwdata/env/global.override.env. At a minimum, you should configure:
+  # ...
+  # globalSettings__mail__smtp__host=<placeholder>
+  # globalSettings__mail__smtp__port=<placeholder>
+  # globalSettings__mail__smtp__ssl=<placeholder>
+  # globalSettings__mail__smtp__username=<placeholder>
+  # globalSettings__mail__smtp__password=<placeholder>
+  # ...
+  # adminSettings__admins=
+   
+  # If you need to make additional configuration changes, you can modify
+  # the settings in `./bwdata/config.yml` and then run:
+  # `./bitwarden.sh rebuild` or `./bitwarden.sh update`
+  - name: Implement changes in config files
+    become: yes
+    become_user: bitwarden
+    become_method: sudo
+    shell:
+      chdir: /opt/bitwarden
+      cmd: /opt/bitwarden/bitwarden.sh rebuild
+
+
+  # Run the following command to apply your changes:
+  # ./bitwarden.sh restart
+  - name: Restart all bitwarden services
+    become: yes
+    become_user: bitwarden
+    become_method: sudo
+    shell:
+      chdir: /opt/bitwarden
+      cmd: /opt/bitwarden/bitwarden.sh restart
+
+
+  ############################################################################################
+  # Also this needs to be fixed. 
+  # DO NOT EVER USE THE PIECE OF CRAP Bitwarden Directory Connector to sync users from ldap 
+  ############################################################################################
+  # SAML SSO: https://bitwarden.com/help/configure-sso-saml/
+ 
+  - debug:
+      msg: |
+        * Now go to URL "{{ bitwarden_server_url }}"
+        * Create a master user account.
+        * Go to "Settings" and add an organization using "+New Organization" link.
+        * Upload the Bitwarden license file for your organization.
+        * Go to the "Organizations" menu and open the "Settings" menu.
+        * Click on the "View API Key" button, enter your password and copy the "client_id" .
+        * Insert these into the next Bitwarden playbook as environment settings on the command line as follows;
+        * $ ansible-playbook install-bitwarden-part-2-saml-sso.yml -e client_id="your-client_id" .
+        * Please continue to the SAML playbook for bitwarden called "install-bitwarden-part-2-saml-sso.yml". 
+        * We are done here.
+        ****************************************************************************************
+
+

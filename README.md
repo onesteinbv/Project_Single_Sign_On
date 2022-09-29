@@ -4,11 +4,13 @@ Over the past months, Onestein has sponsored the development of a set of
 Ansible playbooks to configure Single Sign On (SSO) for several popular open
 source applications.
 
+**Their intended use is to setup SSO in an internal network. Do not use these on systems connected to the internet (yet)**.
+
 Currently it contains playbooks for the following applications:
 
-- Bitwarden
+- Bitwarden: [part 1](playbooks/install-bitwarden-part-1.yml), [part 2](playbooks/install-bitwarden-part-2-saml-sso.yml)
 - CMDBuild is being worked on
-- Jenkins
+- [Jenkins](playbooks/install-jenkins-sso.yml)
 - Gitlab
 - Keycloak (not SSO, but identity provider)
 - Nextcloud

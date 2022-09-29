@@ -1,0 +1,129 @@
+{
+  "clientId": "{{ bitwarden_client_id }}",
+  "name": "{{ bitwarden_client_name }}",
+  "description": "{{ bitwarden_client_name }}",
+  "rootUrl": "",
+  "adminUrl": "{{ keycloak_server_url }}realms/{{ realm }}/protocol/saml/clients/bitwarden",
+  "baseUrl": "",
+  "surrogateAuthRequired": false,
+  "enabled": true,
+  "alwaysDisplayInConsole": false,
+  "clientAuthenticatorType": "client-secret",
+  "redirectUris": [
+    "{{ bitwarden_server_url }}/sso/saml2/{{ organization_uuid}}/Acs",
+  ],
+  "webOrigins": [],
+  "notBefore": 0,
+  "bearerOnly": false,
+  "consentRequired": false,
+  "standardFlowEnabled": true,
+  "implicitFlowEnabled": false,
+  "directAccessGrantsEnabled": true,
+  "serviceAccountsEnabled": false,
+  "publicClient": true,
+  "frontchannelLogout": true,
+  "protocol": "saml",
+  "attributes": {
+    "saml_assertion_consumer_url_redirect": "{{ bitwarden_server_url }}/sso/saml2/{{ organization_uuid}}/Acs",
+    "saml.force.post.binding": "true",
+    "saml.server.signature.keyinfo.ext": "false",
+    "saml.signing.certificate": "{{ sp_crt.stdout }}",
+    "saml.signature.algorithm": "RSA_SHA256",
+    "saml$server$signature$keyinfo$ext": "false",
+    "saml.client.signature": "false",
+    "saml.force.name.id.format": "false",
+    "saml.signing.private.key": "{{ sp_key.stdout }}",
+    "saml.allow.ecp.flow": "false",
+    "saml.server.signature.keyinfo.xmlSigKeyInfoKeyNameTransformer": "KEY_ID",
+    "saml.assertion.signature": "true",
+    "saml.encrypt": "false",
+    "saml_assertion_consumer_url_post": "{{ bitwarden_server_url }}/sso/saml2/{{ organization_uuid}}/Acs",
+    "saml$server$signature": "false",
+    "saml.server.signature": "false",
+    "saml_idp_initiated_sso_url_name": "bitwarden",
+    "saml.artifact.binding.identifier": "{{ lookup('community.general.random_string', length=20) | b64encode }}",
+    "saml.artifact.binding": "false",
+    "saml$server$signature$keyinfo$xmlSigKeyInfoKeyNameTransformer": "KEY_ID",
+    "saml_force_name_id_format": "false",
+    "saml.authnstatement": "true",
+    "display.on.consent.screen": "false",
+    "saml_name_id_format": "email",
+    "saml_signature_canonicalization_method": "http://www.w3.org/2001/10/xml-exc-c14n#",
+    "saml.onetimeuse.condition": "false"
+  },
+  "authenticationFlowBindingOverrides": {},
+  "fullScopeAllowed": true,
+  "nodeReRegistrationTimeout": -1,
+  "protocolMappers": [
+    {
+      "id": "{{ lookup('community.general.random_string', length=20) | to_uuid }}",
+      "name": "X500 surname",
+      "protocol": "saml",
+      "protocolMapper": "saml-user-property-mapper",
+      "consentRequired": false,
+      "config": {
+        "user.attribute": "lastName",
+        "friendly.name": "surname",
+        "attribute.name": "urn:oid:2.5.4.4"
+      }
+    },
+    {
+      "id": "{{ lookup('community.general.random_string', length=20) | to_uuid }}",
+      "name": "X500 email",
+      "protocol": "saml",
+      "protocolMapper": "saml-user-property-mapper",
+      "consentRequired": false,
+      "config": {
+        "user.attribute": "email",
+        "friendly.name": "email",
+        "attribute.name": "urn:oid:1.2.840.113549.1.9.1"
+      }
+    },
+    {
+      "id": "{{ lookup('community.general.random_string', length=20) | to_uuid }}",
+      "name": "groups",
+      "protocol": "saml",
+      "protocolMapper": "saml-group-membership-mapper",
+      "consentRequired": false,
+      "config": {
+        "single": "true",
+        "attribute.nameformat": "Basic",
+        "full.path": "true",
+        "attribute.name": "member"
+      }
+    },
+    {
+      "id": "{{ lookup('community.general.random_string', length=20) | to_uuid }}",
+      "name": "X500 givenName",
+      "protocol": "saml",
+      "protocolMapper": "saml-user-property-mapper",
+      "consentRequired": false,
+      "config": {
+        "user.attribute": "firstName",
+        "friendly.name": "givenName",
+        "attribute.name": "urn:oid:2.5.4.42"
+      }
+    },
+    {
+      "id": "{{ lookup('community.general.random_string', length=20) | to_uuid }}",
+      "name": "role list",
+      "protocol": "saml",
+      "protocolMapper": "saml-role-list-mapper",
+      "consentRequired": false,
+      "config": {
+        "single": "false",
+        "attribute.nameformat": "Basic",
+        "attribute.name": "Role"
+      }
+    }
+  ],
+  "defaultClientScopes": [
+    "role_list"
+  ],
+  "optionalClientScopes": [],
+  "access": {
+    "view": true,
+    "configure": true,
+    "manage": true
+  }
+}
