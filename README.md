@@ -37,3 +37,7 @@ This is work in progress. We hope you will find it useful.
 If you like it, tell others. If you don't like it, tell us.
 
 Jeroen "Kwoot" Baten
+
+# Media
+
+- [5 minute YouTube talk at the 2022 Nextcloud conference about this project](https://www.youtube.com/watch?v=pDPKzo8Bi10).
