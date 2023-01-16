@@ -1,5 +1,5 @@
 ---
-- name: Install nextcloud release 24
+- name: Migrate Nextcloud SNAP! to SSO
   hosts: grpnc
   remote_user: root
   become: true
@@ -14,7 +14,8 @@
     supported_distros: "{{ ansible_distribution }} {{ ansible_distribution_major_version }}"
     nextcloud_fqdn: "nc.{{ domain }}"
     # Yes, this is different from the other playbooks. For a reason...
-    nextcloud_client_id: "{{ nextcloud_server_url }}/apps/user_saml/saml/metadata"
+    # https://nc.onestein.lan/index.php/apps/user_saml/saml/metadata
+    nextcloud_client_id: "https://{{ ansible_fqdn }}/index.php/apps/user_saml/saml/metadata"
     nextcloud_client_name: "client-nextcloud-{{ ansible_fqdn }}"
     keycloak_server_url: https://ad.{{ domain }}
     nextcloud_server_url: https://nc.{{ domain }}
@@ -37,181 +38,15 @@
     - name: Extra update apt cache
       ansible.builtin.apt:
         update_cache: yes
-
-    # Install all needed software in one go.
-    - name: Install all needed packages
-      apt:
-        name: "{{ item }}"
-      loop:
-        - postgresql 
-        - autopostgresqlbackup
-        - nginx
-        - jq
-        - unzip
-        - mlocate
-        - php7.4-fpm
-        - php7.4-pgsql
-        - php7.4-pgsql
-        - php-common
-        - php7.4-cli
-        - php7.4-common
-        - php7.4-opcache
-        - php7.4-readline
-        - php7.4-mbstring
-        - php7.4-xml
-        - php7.4-gd
-        - php7.4-curl
-        - php7.4-ldap
-        - php7.4-zip
-        - php7.4-intl
-        - php7.4-gmp
-        - php7.4-bcmath
-        - php-redis
-        - php-imagick
-        - redis
-        - postgresql-contrib
-        - python3-psycopg2
-        - python3-lxml
-        - libxml2-utils
-        - xmlstarlet
-
-    - name: Set timezone to Europe/Amsterdam
-      community.general.timezone:
-        name: Europe/Amsterdam
-
-    # Setup Postgresql database
-    - name: Setup nextcloud Postgresql database user
-      become: true
-      become_user: postgres
-      postgresql_user:
-        name: nextcloud
-        password: 'nextcloud'
-        #priv: "CONNECT"
-
-    - name: Setup nextcloud Postgresql database
-      become: true
-      become_user: postgres
-      postgresql_db: 
-        name: nextcloud
-        template: 'template0'
-        owner: nextcloud
-        state: present
-
-    - name: Make SSL dir for nginx    
-      ansible.builtin.file:
-        path: /etc/nginx/ssl
-        state: directory
-        mode: '0755'
-
-    - name: Copy SSL key and cert to nginx ssl dir
-      copy:
-        src: "files/{{ item }}"
-        dest: "/etc/nginx/ssl/{{ item }}"
-        owner: root
-        group: root
-        mode: '0600'
-      loop:  
-        - _wildcard.{{ domain }}.pem
-        - _wildcard.{{ domain }}-key.pem
-
-    - set_fact:
-        tls_crt: "/etc/nginx/ssl/_wildcard.{{ domain }}.pem"
-
-    - set_fact:
-        tls_key: "/etc/nginx/ssl/_wildcard.{{ domain }}-key.pem"
-
-    - name: generate and copy nginx config for standalone instance
-      template:
-        src: nextcloud-nginx.j2
-        dest: /etc/nginx/sites-enabled/default
-        force: yes
-
-    - name: overwrite php-fpm www.conf
-      copy:
-        src: files/nextcloud-php-fpm.conf
-        dest: /etc/php/7.4/fpm/pool.d/www.conf
-
-    - name: overwrite php.ini
-      copy:
-        src: files/nextcloud-php.ini
-        dest: /etc/php/7.4/fpm/php.ini
-
-         #
-          #- name: start and enable postgres
-          #  systemd:
-          #    name: postgresql
-          #    enabled: yes
-          #    state: started
-          #  become: true
-          #
-         #
-          #- name: create database
-          #  become: true
-          #  become_user: postgres
-          #  postgresql_db:
-          #    name: "{{ postgres.database }}"
-          #    state: present
-          #
-          # name: create database user
-          #  become: true
-          #  become_user: postgres
-          #  postgresql_user:
-          #    db: "{{ postgres.database }}"
-          #    name: "{{ postgres.user }}"
-          #    password: "{{ postgres.password }}"
-          #    priv: ALL
-          #    state: present
-          #
-    - name: download nextcloud
-      get_url:
-        url: https://download.nextcloud.com/server/releases/latest-24.zip
-        dest: "/root/latest-24.zip"
+        name: xmlstarlet
 
     - name: Unpack nextcloud
-      unarchive:
-        src: /root/latest-24.zip
-        dest: /var/www/html
-        remote_src: yes
+      snap:
+        name: nextcloud
 
-    - name: change owner to www-data in nextcloud dir
-      file:
-        path: /var/www/html/nextcloud
-        state: directory
-        owner: www-data
-        group: www-data
-        recurse: yes
-
-          #
-          #- name: systemd reload
-          #  systemd:
-          #    daemon_reload: yes
-          #  become: true
-          #
-    - name: start and enable nginx
-      systemd:
-        name: nginx
-        state: restarted
-        enabled: yes
-
-    - name: start and enable php-fpm
-      systemd:
-        name: php7.4-fpm
-        enabled: yes
-        state: restarted
-    
-    - name: start and enable redis
-      systemd:
-        name: redis
-        state: started
-        enabled: yes
-
-    - name: Create nextcloud data directory /var/lib/nextcloud
-      file:
-        path: /var/lib/nextcloud
-        state: directory
-        owner: www-data
-        group: www-data
-        mode: '0755'
+    - name: Configure Nextcloud snap to use self-signed certificates
+      shell:
+        cmd: nextcloud.enable-https self-signed
 
     # Retrieve some saml info from our Keycloak server
     # We can create a SAML client at the Keycloak side.  And use REST to
@@ -282,8 +117,8 @@
         body:
           realm: master
           client_id: admin-cli
-          username: "{{ kc_adminid }}"
-          password: "{{ kc_adminpw }}"
+          username: "{{kc_adminid }}"
+          password: "{{kc_adminpw }}"
           grant_type: password
       register: authtoken
 
@@ -410,6 +245,9 @@
     - debug:
         var: deleteclient
 
+    - debug:
+        msg: "If the next step fails, run 'ansible-galaxy collection install community.general'"
+
     - name: Convert Ninja template to variable
       set_fact:
         jsonbody: "{{ lookup('template', 'nextcloud-keycloak-sso.json.j2') }}"
@@ -442,44 +280,44 @@
       debug:
         var: createclientresult.location
 
-    - name: Put a lot of nextcloud OCC commands together in one Ansbible block because they are all become user www-data
-      ##########################################################################
-      # Start of Nexctcloud OCC commands block
-      ##########################################################################
+    - name: Put nextcloud OCC commands together in one Ansbible block 
+#     ##########################################################################
+#     # Start of Nexctcloud OCC commands block
+#     ##########################################################################
       block:
 
       - name: Check if we need to run occ maintenance:install command
         shell:
-          cmd: php occ list
-          chdir: /var/www/html/nextcloud
+          cmd: nextcloud.occ list
+          chdir: /snap/nextcloud/current
         register: occ_list
 
       - name: Installing nextcloud from the command line if first time.
         shell:
-          cmd: php occ maintenance:install --database pgsql --database-name nextcloud --database-host 127.0.0.1 --database-port 5432 --database-user nextcloud --database-pass 'nextcloud' --admin-user admin --admin-pass admin --admin-email jbaten@i2rs.nl --data-dir /var/lib/nextcloud
-          chdir: /var/www/html/nextcloud
+          cmd: nextcloud.occ maintenance:install --database pgsql --database-name nextcloud --database-host 127.0.0.1 --database-port 5432 --database-user nextcloud --database-pass 'nextcloud' --admin-user admin --admin-pass admin --admin-email jbaten@i2rs.nl --data-dir /var/lib/nextcloud
+          chdir: /snap/nextcloud/current
         when: '"maintenance:install" in occ_list.stdout'
 
-      - name: Configuring/adding trusted domain nc.{{ domain }}
+      - name: "Configuring/adding trusted domain nc.{{ domain }}"
         shell:
-          cmd: php occ config:system:set trusted_domains 1 --value='nc.{{ domain }}'
-          chdir: /var/www/html/nextcloud
+          cmd: "nextcloud.occ config:system:set trusted_domains 1 --value='nc.{{ domain }}'"
+          chdir: /snap/nextcloud/current
   
       - name: Enable already installed but default disabled Nextcloud External Storage support
         shell:
-          cmd: php occ app:enable files_external
-          chdir: /var/www/html/nextcloud
+          cmd: nextcloud.occ app:enable files_external
+          chdir: /snap/nextcloud/current
   
       - name: Retrieve list of currently installed apps
         shell:
-          cmd: php occ app:list
-          chdir: /var/www/html/nextcloud
+          cmd: nextcloud.occ app:list
+          chdir: /snap/nextcloud/current
         register: app_list
      
       - name: Install and enable all the Nextcloud apps we like
         shell:
-          cmd: php occ app:install "{{ item }}"
-          chdir: /var/www/html/nextcloud
+          cmd: nextcloud.occ app:install "{{ item }}"
+          chdir: /snap/nextcloud/current
         loop:
           - deck
           - user_saml
@@ -506,27 +344,28 @@
       #       "general-allow_multiple_user_back_ends": "0"
 
       # If 0 then autocreate users, if 1, then not...  
+      # Set this to 1 and try to solve it yourself...
       - name: Configure Only allow authentication if an account exists on some other backend (e.g. LDAP).
         shell:
-          cmd: php occ config:app:set user_saml general-require_provisioned_account --value="0"
-          chdir: /var/www/html/nextcloud
+          cmd: nextcloud.occ config:app:set user_saml general-require_provisioned_account --value="0"
+          chdir: /snap/nextcloud/current
 
       # Disable this setting (means set it to 1) once Keycloak connection works. 
       - name: Configure Allow the use of multiple user back-ends (e.g. LDAP)
         shell:
           # Yes, I know, a zero to switch it on is weird.
-          cmd: php occ config:app:set user_saml general-allow_multiple_user_back_ends --value="1"
-          chdir: /var/www/html/nextcloud
+          cmd: nextcloud.occ config:app:set user_saml general-allow_multiple_user_back_ends --value="1"
+          chdir: /snap/nextcloud/current
 
       # Add a new identity provider
 
       # Start to setup a new identity provider with the following settings
 
-      #  sudo -u www-data php occ saml:config:get
+      #  sudo -u www-data nextcloud.occ saml:config:get
       - name: Dump current saml config to see changes
         shell:
-          cmd: php occ  saml:config:get
-          chdir: /var/www/html/nextcloud
+          cmd: nextcloud.occ  saml:config:get
+          chdir: /snap/nextcloud/current
 
       ##########################################################################
       # After some thought I decided to claim/overwrite saml_user config set 1 !
@@ -534,8 +373,8 @@
       # This means we start with deleting entry 1
       - name: Deleting original first saml configuration entry !!!
         shell:
-          cmd: php occ  saml:config:delete 1
-          chdir: /var/www/html/nextcloud
+          cmd: nextcloud.occ  saml:config:delete 1
+          chdir: /snap/nextcloud/current
 
       #    Attribute to map the UID to :  username
       #    Displayname : any name you like : e.g. Keycloak
@@ -582,7 +421,7 @@
       #    [--sp-privateKey SP-PRIVATEKEY] 
       #    [--output [OUTPUT]] [--] <providerId>
       #
-      #  sudo -u www-data php occ saml:config:get
+      #  sudo -u www-data nextcloud.occ saml:config:get
       #  - 1:
       #    - general-uid_mapping: username
       #    - general-idp0_display_name: Keycloak
@@ -597,110 +436,109 @@
       #    PLEASE NOTE: No '--value'  to set the value!
       - name: Saml configuration set general-idp0_display_name 
         shell:
-          cmd: php occ  saml:config:set --general-idp0_display_name  "Keycloak"   1
-          chdir: /var/www/html/nextcloud
+          cmd: nextcloud.occ  saml:config:set --general-idp0_display_name  "Keycloak"   1
+          chdir: /snap/nextcloud/current
 
       #    - general-uid_mapping: username
       #    PLEASE NOTE: No '--value'  to set the value!
       - name: Saml configuration set general-uid_mapping
         shell:
-          cmd: php occ  saml:config:set --general-uid_mapping "username"   1
-          chdir: /var/www/html/nextcloud
+          cmd: nextcloud.occ  saml:config:set --general-uid_mapping "username"   1
+          chdir: /snap/nextcloud/current
 
       # Add mapping of email adres
       # saml-attribute-mapping-email_mapping: email
       - name: Saml configuration set saml-attribute-mapping-email_mapping
         shell:
-          cmd: php occ  saml:config:set --saml-attribute-mapping-email_mapping "email"   1
-          chdir: /var/www/html/nextcloud
+          cmd: nextcloud.occ  saml:config:set --saml-attribute-mapping-email_mapping "email"   1
+          chdir: /snap/nextcloud/current
 
       #    - idp-entityId: https://ad.{{ domain }}/realms/ONESTEIN.LAN
       #    https://nextcloud.yourdomain.com/index.php/apps/user_saml/metadata  ?
       #    What is an Entity ID: https://spaces.at.internet2.edu/display/federation/saml-metadata-entityid
       - name: Saml configuration set idp-entityId  
         shell:
-#         cmd: php occ  saml:config:set  --idp-entityId  "{{ nextcloud_server_url }}/index.php/apps/user_saml/metadata" 1
-          cmd: php occ  saml:config:set  --idp-entityId  "{{ keycloak_server_url }}/realms/{{ realm }}" 1
-#         cmd: php occ  saml:config:set  --idp-entityId  "{{ nextcloud_client_id }}" 1
-          chdir: /var/www/html/nextcloud
+#         cmd: nextcloud.occ  saml:config:set  --idp-entityId  "{{ nextcloud_server_url }}/index.php/apps/user_saml/metadata" 1
+          cmd: nextcloud.occ  saml:config:set  --idp-entityId  "{{ keycloak_server_url }}/realms/{{ realm }}" 1
+#         cmd: nextcloud.occ  saml:config:set  --idp-entityId  "{{ nextcloud_client_id }}" 1
+          chdir: /snap/nextcloud/current
 
       #    - idp-singleSignOnService.url: https://ad.{{ domain }}/realms/ONESTEIN.LAN/protocol/saml
       # --idp-singleSignOnService.url 
       - name: Saml configuration set general-uid_mapping
         shell:
-          cmd: php occ  saml:config:set --idp-singleSignOnService.url "{{ keycloak_server_url }}/realms/{{ realm }}/protocol/saml"   1
-          chdir: /var/www/html/nextcloud
+          cmd: nextcloud.occ  saml:config:set --idp-singleSignOnService.url "{{ keycloak_server_url }}/realms/{{ realm }}/protocol/saml"   1
+          chdir: /snap/nextcloud/current
 
       #    - idp-singleLogoutService.url: https://ad.{{ domain }}/realms/ONESTEIN.LAN/protocol/saml
       # --idp-singleLogoutService.url 
       - name: Saml configuration set general-uid_mapping
         shell:
-          cmd: php occ  saml:config:set --idp-singleLogoutService.url  "{{ keycloak_server_url }}/realms/{{ realm }}/protocol/saml"   1
-          chdir: /var/www/html/nextcloud
+          cmd: nextcloud.occ  saml:config:set --idp-singleLogoutService.url  "{{ keycloak_server_url }}/realms/{{ realm }}/protocol/saml"   1
+          chdir: /snap/nextcloud/current
 
       # - security-authnRequestsSigned: 1
       - name: Saml configuration set  security-authnRequestsSigned
         shell:
-          cmd: php occ  saml:config:set --security-authnRequestsSigned  "1"   1
-          chdir: /var/www/html/nextcloud
+          cmd: nextcloud.occ  saml:config:set --security-authnRequestsSigned  "1"   1
+          chdir: /snap/nextcloud/current
 
       # - security-logoutRequestSigned: 1
       - name: Saml configuration set security-logoutRequestSigned
         shell:
-          cmd: php occ  saml:config:set --security-logoutRequestSigned  "1"   1
-          chdir: /var/www/html/nextcloud
+          cmd: nextcloud.occ  saml:config:set --security-logoutRequestSigned  "1"   1
+          chdir: /snap/nextcloud/current
 
       # - security-logoutResponseSigned: 1
       - name: Saml configuration set  security-logoutResponseSigned
         shell:
-          cmd: php occ  saml:config:set --security-logoutResponseSigned  "1"   1
-          chdir: /var/www/html/nextcloud
+          cmd: nextcloud.occ  saml:config:set --security-logoutResponseSigned  "1"   1
+          chdir: /snap/nextcloud/current
 
       # - security-wantMessagesSigned: 1
       - name: Saml configuration set security-wantMessagesSigned
         shell:
-          cmd: php occ  saml:config:set --security-wantMessagesSigned  "1"   1
-          chdir: /var/www/html/nextcloud
+          cmd: nextcloud.occ  saml:config:set --security-wantMessagesSigned  "1"   1
+          chdir: /snap/nextcloud/current
 
       # - security-wantAssertionsSigned: 1
 #     - name: Saml configuration set  security-wantAssertionsSigned
 #       shell:
-#         cmd: php occ  saml:config:set --security-wantAssertionsSigned  "1"   1
-#         chdir: /var/www/html/nextcloud
-
+#         cmd: nextcloud.occ  saml:config:set --security-wantAssertionsSigned  "1"   1
+#         chdir: /snap/nextcloud/current
 
       # sp_certs_not_found_and_required, idp_cert_or_fingerprint_not_found_and_required
       #    [--sp-x509cert SP-X509CERT] 
       #    [--sp-privateKey SP-PRIVATEKEY] 
       - name: Saml configuration set  sp-x509cert 
         shell:
-          cmd: php occ  saml:config:set --sp-x509cert   "{{ sp_crt.stdout }}"   1
-          chdir: /var/www/html/nextcloud
+          cmd: nextcloud.occ  saml:config:set --sp-x509cert   "{{ sp_crt.stdout }}"   1
+          chdir: /snap/nextcloud/current
 
       - name: Saml configuration set sp-privateKey 
         shell:
-          cmd: php occ  saml:config:set --sp-privateKey   "{{ sp_key.stdout }}"   1
-          chdir: /var/www/html/nextcloud
+          cmd: nextcloud.occ  saml:config:set --sp-privateKey   "{{ sp_key.stdout }}"   1
+          chdir: /snap/nextcloud/current
 
       #    [--idp-x509cert IDP-X509CERT] 
       - name: Saml configuration set  idp-x509cert 
         shell:
-          cmd: php occ  saml:config:set --idp-x509cert   "{{ idp_crt }}"   1
-          chdir: /var/www/html/nextcloud
+          cmd: nextcloud.occ  saml:config:set --idp-x509cert   "{{ idp_crt }}"   1
+          chdir: /snap/nextcloud/current
 
 
       - name: Dump current saml config to see changes
         shell:
-          cmd: php occ  saml:config:get
-          chdir: /var/www/html/nextcloud
+          cmd: nextcloud.occ  saml:config:get
+          chdir: /snap/nextcloud/current
         register: ncconfig
  
       ##########################################################################
       # Closing of Nexctcloud OCC commands block
       ##########################################################################
-      become: yes
-      become_user: www-data
-      become_method: sudo
+#     become: yes
+#     become_user: www-data
+#     become_method: sudo
     ##########################################################################
     # End of Nexctcloud OCC commands block
     ##########################################################################
@@ -710,11 +548,11 @@
         var: ncconfig
 
     - name: Post-install message IT IS IMPORTANT TO READ THIS
-      debug:
-        msg: |  
+      pause:
+        prompt: |  
           ********************************************************************************************************
-          * Nextcloud is installed in /var/www/html/nextcloud. 
-          * Here you can also find the database config in /var/www/html/nextcloud/config/config.php
+          * Nextcloud is installed in /snap/nextcloud/current. 
+          * Here you can also find the database config in /snap/nextcloud/current/config/config.php
           * Nextcloud data is stored in /var/lib/nextcloud.
           * Default login after installation is admin/admin
           * SSO login can be curcumvented by adding '?direct=1' to the url.

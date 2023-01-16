@@ -427,8 +427,8 @@
         body:
           realm: master
           client_id: admin-cli
-          username: "{{ kc_kc_kc_kc_adminid }}"
-          password: "{{ kc_kc_kc_kc_adminpw }}"
+          username: "{{ kc_adminid }}"
+          password: "{{ kc_adminpw }}"
           grant_type: password
       register: authtoken
 

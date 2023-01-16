@@ -2,33 +2,33 @@
 # All hosts have the same IP so it is easier for me to test.
 
 [grpad]
-ad  ansible_host=10.1.1.123
+ad  ansible_host=127.0.0.1
 
 [grpzabbixserver]
-zabbix ansible_host=10.1.1.123
+zabbix ansible_host=127.0.0.1
 
 [grpxwiki]
-wiki ansible_host=10.1.1.123
+wiki ansible_host=127.0.0.1
 
 [grpcmdb]
-cmdb  ansible_host=10.1.1.123
+cmdb  ansible_host=127.0.0.1
 
 [grpgitlab]
-gitlab  ansible_host=10.1.1.123
+gitlab  ansible_host=127.0.0.1
 
 [grpnc]
-nc  ansible_host=10.1.1.123
+nc  ansible_host=127.0.0.1
 
 [grpjenkins]
-jenkins  ansible_host=10.1.1.123
+jenkins  ansible_host=127.0.0.1
 
 [grpbitwarden]
-password ansible_host=10.1.1.123 
+password ansible_host=127.0.0.1
 
 [grpodoo15]
-odoo15	ansible_host=10.1.1.123
+odoo15	ansible_host=127.0.0.1
 
 [grpodoo14]
-odoo14	ansible_host=10.1.1.123
+odoo14	ansible_host=127.0.0.1
 
 

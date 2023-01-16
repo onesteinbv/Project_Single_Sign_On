@@ -1,0 +1,753 @@
+---
+- name: Install CMDBuild
+  hosts: grpcmdb
+  remote_user: root
+  become: true
+  become_user: root
+  become_method: sudo
+
+  # use this command line: ansible-playbook -v -i hosts install-cmdb.yml -u root
+  # Execute ansible-playbook playbookfile.yml -i hosts --vault-password-file .vault-password
+
+  vars:
+    cmdb_server_url: https://cmdb.{{ domain }}
+    cmdb_client_id: "client-cmdb"
+
+  tasks:
+    - debug:
+        msg: Readable debug output  export ANSIBLE_STDOUT_CALLBACK=debug
+
+    - name: Read global vars
+      include_vars: global-vars.yml
+
+    - name: Read encrypted content
+      include_vars: encrypted-vars.yml
+
+
+    - name: Update repositories cache 
+      apt:
+        update_cache: yes
+
+    - name: Set timezone to Europe/Amsterdam
+      community.general.timezone:
+        name: Europe/Amsterdam
+
+    - name: Install needed packages
+      apt:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - openjdk-17-jdk
+        - tomcat9
+        - postgresql
+        - libreoffice
+        - autopostgresqlbackup
+        - nginx
+        - python3-psycopg2
+        - python3-lxml
+        - libxml2-utils
+        - xmlstarlet
+
+    - name: Check if war file already downloaded
+      stat:
+        path:  /root/cmdbuild-3.4.war
+      register: warfile_stat
+
+    
+
+    # Download cmdbuild-3.4.war via cmdbuild.org
+    - name: Download CMDbuild war file with big timeout value (because it comes from Sourceforge...)
+      # sudo wget https://maven.xwiki.org/xwiki-keyring.gpg -P /usr/share/keyrings/
+      get_url:
+        url: https://downloads.sourceforge.net/project/cmdbuild/3.4/cmdbuild-3.4.1.war
+        dest: /root/cmdbuild-3.4.1.war
+        mode: '0644'
+        force: no
+        timeout: 120
+      when: not warfile_stat.stat.exists
+
+    # Copy war file to webapps dir
+    - name: Install war file in tomcat webapps dir
+      copy:
+        src: /root/cmdbuild-3.4.1.war
+        dest: /var/lib/tomcat9/webapps/cmdbuild.war
+        remote_src: yes
+        mode: '0644'
+  
+ 
+    # add system group cmdbuild
+    - name: Ensure group "cmdbuild" exists
+      ansible.builtin.group:
+        name: cmdbuild
+        state: present
+        system: true
+
+    # add system user cmdbuild with group cmdbuild
+    - name: Create system user 'cmdbuild' and primary group of 'admin'
+      ansible.builtin.user:
+        name: cmdbuild
+        comment: cmdbuild server account
+        home: /home/cmdbuild
+        create_home: no
+        group: cmdbuild
+        groups: syslog
+        shell: /bin/bash
+        system: true
+
+   # postgresql make user cmdbuild password something
+   # Setup Postgresql database
+    - name: Setup cmdbuild Postgresql database user
+      become: true
+      become_user: postgres
+      postgresql_user:
+        name: cmdbuild
+        password: 'cmdbuild'
+        #priv: "CONNECT"
+        
+    # postgresql create database cmdbuild owner cmdbuild
+    - name: Make sure cmdbuild Postgresql database exists.
+      become: true
+      become_user: postgres
+      postgresql_db: 
+        name: cmdbuild
+        template: 'template0'
+        owner: cmdbuild
+        state: present
+      register: dbwork
+
+    - debug:
+        msg: "{{ dbwork }}"
+
+    # Copy db init file to /tmp so user postgres can read it
+    - name: Copy database dump file to /tmp if the database was just created.
+      copy:
+        src: files/cmdbuild.dump.gz
+        dest: /tmp/cmdbuild.dump.gz
+        mode: '0644'
+        owner: postgres
+        group: postgres
+      when: dbwork.changed
+
+    # Populate/initialize cmdbuild database
+    - name: Initialize cmdbuild datatase if it was just created.
+      become: true
+      become_user: postgres
+      shell:
+        cmd: /usr/bin/gunzip -c /tmp/cmdbuild.dump.gz | psql postgresql://cmdbuild:cmdbuild@localhost:5432/cmdbuild
+      when: dbwork.changed
+
+    # Set default jdk to /usr/lib/jvm/java-17-openjdk-amd64/ in /etc/default/tomcat9
+    - name: Setup default jdk in /etc/default/tomcat9
+      lineinfile:
+        path: /etc/default/tomcat9
+        regexp: 'JAVA_HOME=.*'
+        line: 'JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64/'
+
+    # Setup cmdbuild config directory
+    - name: Setup cmdbuild config directory
+      file:
+        path: /var/lib/tomcat9/conf/cmdbuild
+        state: directory
+        owner: tomcat
+        group: tomcat
+
+    - name: Configure database connection
+      blockinfile:
+        path: /var/lib/tomcat9/conf/cmdbuild/database.conf
+        create: yes
+        block: |
+          db.url=jdbc:postgresql://localhost:5432/cmdbuild
+          db.username=cmdbuild
+          db.password=cmdbuild
+          db.admin.username=postgres
+          db.admin.password=postgres  
+ 
+
+    # Set up nginx
+    - name: Install nginx config file
+      copy:
+        src: files/cmdb_nginx.conf
+        dest: /etc/nginx/sites-available/default 
+
+    - name: Make SSL dir for nginx    
+      ansible.builtin.file:
+        path: /etc/nginx/ssl
+        state: directory
+        mode: '0755'
+
+    - name: Copy SSL key and cert to nginx ssl dir
+      copy:
+        src: "files/{{ item }}"
+        dest: "/etc/nginx/ssl/{{ item }}"
+        owner: root
+        group: root
+        mode: '0600'
+      loop:  
+        - _wildcard.{{ domain }}.pem
+        - _wildcard.{{ domain }}-key.pem
+
+    # Restart nginx
+    - name: Restart nginx
+      systemd: 
+        name: nginx
+        state: restarted
+        enabled: yes
+
+
+    # Setup SSO configuration Using SSO SAML authentication as described in
+    # their "Technical Manual" page 27 and after.  Also:
+    # https://forum.cmdbuild.org/t/cmdbuild-3-3-2-saml2-authentication-how-to-enable/5188/2
+    #
+    # We can create a SAML client at the Keycloak side.  And use REST to
+    # configure at the CMDBuild side.
+
+    ####################################################    
+    # Create a SAML client at the Keycloak side.
+    ####################################################    
+     
+    # Generate a key on the cmdb server
+    - name: Generate key on cmdb server
+      shell:
+        cmd: /usr/bin/openssl req -x509 -sha256 -newkey rsa:1024 -keyout sp.key -out sp.crt -days 3650 -nodes -subj '/CN={{ domain }}'
+        chdir: /tmp
+
+    # Start getting auth token      
+    # Retrieve token url needed.  Returns JSON payload with var token-service.
+    - name: Retrieve token url from server
+      uri:
+        url: "{{ keycloak_server_url }}/realms/master"
+        validate_certs: false
+      register: tokenurl
+
+    - debug:
+        var: tokenurl.json["token-service"] 
+
+    - name: Store url for easier retrieval
+      set_fact:
+        token_url: "{{ tokenurl.json[\"token-service\"] }}"
+
+    # Call info endpoint 
+    - name: "Retrieve endpoint info for our realm {{ realm }}"
+      uri:
+        url: "{{ keycloak_server_url }}/realms/{{ realm }}/.well-known/openid-configuration"
+        validate_certs: false
+      register: endpointinfo
+
+    - debug:
+        var: endpointinfo
+   
+    - name: Store authorization_endpoint for faster retrieval
+      set_fact:
+        authorization_endpoint: "{{ endpointinfo.json[\"authorization_endpoint\"] }}"
+
+    # "authorization_endpoint": "https://ad.{{ domain }}/realms/ONESTEIN.LAN/protocol/openid-connect/auth",
+    - debug:
+        var: authorization_endpoint
+
+    - name: Store token_endpoint for faster retrieval
+      set_fact:
+        token_endpoint: "{{ endpointinfo.json[\"token_endpoint\"] }}"
+    - debug:
+        var: token_endpoint
+
+    - name: Store userinfo_endpoint for faster retrieval
+      set_fact:
+        userinfo_endpoint: "{{ endpointinfo.json[\"userinfo_endpoint\"] }}"
+    - debug:
+        var: userinfo_endpoint
+
+    # Get authentication token from token-service url
+    - name: Retrieve authentication token from token-service url
+      uri:
+        url: "{{ tokenurl.json[\"token-service\"] }}/token"
+        method: POST
+        body_format: form-urlencoded
+        validate_certs: false
+        body:
+          realm: master
+          client_id: admin-cli
+          username: "{{ kc_adminid }}"
+          password: "{{ kc_adminpw }}"
+          grant_type: password
+      register: authtoken
+
+    - debug:
+        var: authtoken
+
+    - debug:
+        var: authtoken.json["access_token"]  
+
+    - name: Store access token into variable for easier retrieval
+      set_fact:
+        auth_token: "{{ authtoken.json[\"access_token\"] }}"
+
+    - debug:
+        var: auth_token  
+
+    # Retrieve IDP metadata descriptor and copy the 509 formatted certificate
+    # https://ad.{{ domain }}/realms/ONESTEIN.LAN/protocol/saml/descriptor
+    - name: Retrieve IDP metadata descriptor to use the 509 formatted certificate
+      uri:
+        url: "{{ keycloak_server_url }}/realms/{{ realm }}/protocol/saml/descriptor"
+        method: get
+        validate_certs: false
+        return_content: yes  
+      register: idp_metadata
+
+    - debug:
+        var: idp_metadata
+
+# Please do not go down this road and stay sane...
+#   - xml:
+#       xmlstring: "{{ idp_metadata.content }}"
+#       xpath: /listResponse/instance
+#       xpath: /md:EntityDescriptor/md:IDPSSODescriptor/md:KeyDescriptor/ds:KeyInfo/ds:X509Data/ds:X509Certificate
+#       content: attribute
+#     register: instance_attributes
+
+    # We are going to save the XML metadate for shell processing    
+    - name: Save IDP XML metadata to file for processing
+      copy:
+        content: "{{  idp_metadata.content }}" 
+        dest: /tmp/idp.xml
+
+    # We are going to use a shell command to retrieve the value for X509Certificate    
+    - name: Run xmlstarlet to retrieve X509Certificate
+      shell:
+        cmd: /usr/bin/xmlstarlet sel -t -v //ds:X509Certificate /tmp/idp.xml
+      register: xmlstarlet
+
+    - debug:
+        var: xmlstarlet
+
+    - name: Store output in certificate variable
+      set_fact:
+        idp_crt: "{{ xmlstarlet.stdout }}"
+
+    - name: Remove first line from tmp files
+      lineinfile:
+        path: "/tmp/{{ item }}"
+        regexp: '^-----(BEGIN|END).*-----$'
+        state: absent
+      loop:
+        - sp.crt
+        - sp.key
+
+    - name: Retrieve remote ssl cert
+      shell:
+        cmd: cat  /tmp/sp.crt  |  tr -d '\n'
+      register: sp_crt
+
+    - debug:
+        var: sp_crt
+
+    - name: Retrieve remote ssl key
+      shell:
+        cmd: cat  /tmp/sp.key  |  tr -d '\n'
+      register: sp_key
+
+    - debug:
+        var: sp_key
+
+    # Retrieve current list of clients of our type
+    # So, this works in curl:
+    # curl -k -v -H "Accept: application/json" -H "Authorization: Bearer ${access_token}" "https://ad.{{ domain }}:8443/admin/realms/master/clients" | jq .
+    - name: Retrieve current list of clients and search for already existing "{{ cmdb_client_id }} "
+      uri:
+        url: "{{ keycloak_server_url }}/admin/realms/{{ realm }}/clients?clientId={{ cmdb_client_id }}"
+        headers:
+         Accept: "application/json"
+         Authorization: "Bearer {{ auth_token }}" 
+        method: get
+        validate_certs: false
+      register: existingclient
+
+    - name: Returned json
+      debug:
+        var: existingclient
+
+    - name: Copy existing client to backup file.
+      copy:
+       content: "{{ existingclient }}"
+       dest: /tmp/cmdb-existing-client-backup.json
+
+    - name: Find ID in returned json
+      debug:
+        var: existingclient.json[0].id
+
+    - name: Delete client id  "{{ cmdb_client_id }}" if it already exists.
+      # Example: "id": "ba973624-2d00-488f-8d18-154224c63f8f"
+      uri:
+        url: "{{ keycloak_server_url }}/admin/realms/{{ realm }}/clients/{{ existingclient.json[0].id }}"
+        headers:
+         Accept: "application/json"
+         Authorization: "Bearer {{ auth_token }}" 
+        method: DELETE
+        validate_certs: false
+        status_code: 204
+      when: existingclient.json[0].id is defined
+      register: deleteclient
+ 
+    - debug:
+        var: deleteclient
+
+    - name: Convert Ninja template to variable
+      set_fact:
+        jsonbody: "{{ lookup('template', 'cmdb-keycloak-sso.json.j2') }}"
+
+    - debug:
+        var: jsonbody
+
+    - name: For debugging store json var in local file
+      copy:
+        content: "{{ jsonbody }}"
+        dest: /tmp/jsonbody
+
+   # Generate the json payload to upload
+    - name: Upload JSON template file to create new Client ID on Keycloak server
+      uri:
+        url: "{{ keycloak_server_url }}/admin/realms/{{ realm }}/clients"
+        headers:
+         Accept: "application/json"
+         Authorization: "Bearer {{ auth_token }}" #.json[\"access_token\"]  }}"
+        method: POST
+        validate_certs: false
+        body_format: json
+        body: "{{ jsonbody }}"
+        status_code: 201
+      register: createclientresult
+   
+    # Good news! Result contains location of new client id in location
+    # Example: "location": "https://ad.{{ domain }}:8443/admin/realms/ONESTEIN.LAN/clients/e01a87cf-537c-441e-b6ee-17f4cd07d92c"
+    - name: If all went well we now have a locaton of the newly created Client ID
+      debug:
+        var: createclientresult.location
+
+    # So far, so good
+    #
+    ####################################################    
+    # Configure CMDBuild authentication.
+    ####################################################    
+    # I tried to use the editconfig (/cmdbuild.sh restws editconfig)to set values 
+    # or example:cmdbuild.sh restws setconfig org.cmdbuild.dms.enabled true
+    # Well, cmdbuild.sh restws is not documented and tough to reverse engineer.
+    #
+    #
+    # SAML related configs:
+    # Config	Type	Description
+    # org.cmdbuild.auth.module.saml.handlerScript	        String	SAML authentication response handler script
+    # org.cmdbuild.auth.module.saml.idp.cert    	        String	SAML idp certificate (uit X509Certificate)
+    # org.cmdbuild.auth.module.saml.idp.id      	        String	SAML idp id URL (client-cmdb)
+    # org.cmdbuild.auth.module.saml.idp.login	            String	SAML idp login URL (https://cmdb.{{ domain }}/cmdbuild/ui/#login)
+    # org.cmdbuild.auth.module.saml.idp.logout	            String	SAML idp logout URL (https://cmdb.{{ domain }}/cmdbuild/ui/#logout)
+    # org.cmdbuild.auth.module.saml.logout.enabled	        Boolean	SAML idp logout enabled flag
+    # org.cmdbuild.auth.module.saml.requireSignedAssertions	Boolean	SAML require signed assertion flag
+    # org.cmdbuild.auth.module.saml.requireSignedMessages	Boolean	SAML require signed messages flag
+    # org.cmdbuild.auth.module.saml.signatureAlgorithm	    String	SAML signature algorithm URL
+    # org.cmdbuild.auth.module.saml.sp.baseUrl	            String	SAML service provider base URL ("/"
+    # org.cmdbuild.auth.module.saml.sp.cert	                String	SAML service provider base certificate (uit cert file)
+    # org.cmdbuild.auth.module.saml.sp.id	                String	SAML service provider id URL
+    # org.cmdbuild.auth.module.saml.sp.key	                String	SAML service provider private key (uit key file)
+    # org.cmdbuild.auth.module.saml.strict	                String	SAML service provider strict validation flag
+
+    # Trying to set org.cmdbuild.auth.modules = default, saml
+    # This can also be done using REST calls, but you need to make the auth.conf file readable, so we do it this way.
+
+    # We end now. But if we want to do rest stuff, uncomment below and poll first until online
+    
+    # The next things only works after adding ReadWritePaths=/etc/tomcat9/cmdbuild/ to /lib/systemd/system/tomcat9.service
+    - name: Add  ReadWritePaths=/etc/tomcat9/cmdbuild/ to /lib/systemd/system/tomcat9.service so we can edit the config.
+      lineinfile:
+        path: /lib/systemd/system/tomcat9.service 
+        insertafter: '^ReadWritePaths=/var/log/tomcat9/.*'
+        line: 'ReadWritePaths=/etc/tomcat9/cmdbuild/'
+    - name: Do a systemd daemon-reload now
+      systemd:
+        daemon_reload: true
+    # Restart tomcat9
+    - name: Restart tomcat9
+      systemd: 
+        name: tomcat9
+        state: restarted
+        enabled: yes
+
+    - debug:
+        msg: "Start waiting for 443 to become available"
+
+    - wait_for: 
+        port: 443 
+        delay: 20
+
+    # Measured 12 attempts, so 25 max should work most of the time.
+    - name: check if "{{ cmdb_server_url }}/cmdbuild/rest/v3/sessions" is open on the host (even a 403 means it is responding).
+      uri:
+        url: "{{ cmdb_server_url }}/cmdbuild/rest/v3/sessions"
+        status_code: 403
+        validate_certs: false
+        follow_redirects: none
+        method: GET
+      register: amiup
+      until: amiup.status == 403
+      retries: 25 # 25 * 5 seconds = 1hour (60*60/5)
+      delay: 5 # Every 5 seconds
+        
+#   - fail:
+#     msg:
+#       "* There was an error starting the tomcat server"
+#     when: 'ok' not in "{{ amiup.content }}"
+
+    - debug:
+        msg: "Done waiting for 443"
+
+    # Get authentication token from cmdb token-service url
+    # After installation, the default login is admin/admin.
+    - name: Retrieve authentication token from cmdb token-service url
+      uri:
+        url: "{{ cmdb_server_url }}/cmdbuild/services/rest/v3/sessions?scope=service&returnId=true"
+        method: POST
+        body_format: json
+        validate_certs: false
+        body:
+          username: "{{ cmdb_admin_id }}"
+          password: "{{ cmdb_admin_pw }}"
+      register: cmdbreq1
+
+    - name: Store authentication id into sessionid variable for easier retrieval
+      set_fact:
+        sessionid: "{{ cmdbreq1.json.data._id }}"
+
+    - name: Retrieve configuration of system from cmdb rest url
+      uri:
+        url: "{{ cmdb_server_url }}/cmdbuild/services/rest/v3/configuration/system"
+        method: GET
+        validate_certs: false
+        headers: { 'Cmdbuild-authorization': "{{ sessionid }}" }
+      register: cmdbreq3
+
+    - debug:
+        var: cmdbreq3
+
+    - name: Retrieve cmdb system config (compare to previous step!) from cmdb rest url
+      uri:
+        url: "{{ cmdb_server_url }}/cmdbuild/services/rest/v3/system/config"
+        method: GET
+        validate_certs: false
+        headers: { 'Cmdbuild-authorization': "{{ sessionid }}", 'includeDefault':  "True" }
+      register: cmdbconf
+
+    - debug:
+        var: cmdbconf
+
+    # Werkt goed.
+    - name: Retrieve value of org.cmdbuild.auth.module.saml.idp.id from cmdb rest url
+      uri:
+        url: "{{ cmdb_server_url }}/cmdbuild/services/rest/v3/system/config/org.cmdbuild.auth.module.saml.idp.id"
+        method: GET
+        validate_certs: false
+        headers: { 'Cmdbuild-authorization': "{{ sessionid }}" }
+
+
+    # Now we know this is stored in auth.conf as module.saml.idp.id  
+    - name: Set value of org.cmdbuild.auth.module.saml.idp.id to "{{ keycloak_server_url }}"
+      uri:
+        url: "{{ cmdb_server_url }}/cmdbuild/services/rest/v3/system/config/org.cmdbuild.auth.module.saml.idp.id"
+        method: PUT
+        body_format: form-urlencoded
+        validate_certs: false
+        headers: { 'Cmdbuild-authorization': "{{ sessionid }}" }
+        body:
+          "{{ keycloak_server_url }}"
+
+    - name: Set value of org.cmdbuild.auth.module.saml.sp.id to "{{ cmdb_client_id }}"
+      uri:
+        url: "{{ cmdb_server_url }}/cmdbuild/services/rest/v3/system/config/org.cmdbuild.auth.module.saml.sp.id"
+        method: PUT
+        body_format: form-urlencoded
+        validate_certs: false
+        headers: { 'Cmdbuild-authorization': "{{ sessionid }}" }
+        body:
+          "{{ cmdb_client_id }}"
+
+
+    - name: Set value of org.cmdbuild.auth.module.saml.idp.cert to "{{ idp_crt }}"
+      uri:
+        url: "{{ cmdb_server_url }}/cmdbuild/services/rest/v3/system/config/org.cmdbuild.auth.module.saml.idp.cert"
+        method: PUT
+        body_format: form-urlencoded
+        validate_certs: false
+        headers: { 'Cmdbuild-authorization': "{{ sessionid }}" }
+        body:
+          "{{ idp_crt }}"
+
+    - name: Set value of org.cmdbuild.auth.module.saml.sp.key to "{{ sp_key.stdout }}"
+      uri:
+        url: "{{ cmdb_server_url }}/cmdbuild/services/rest/v3/system/config/org.cmdbuild.auth.module.saml.sp.key"
+        method: PUT
+        body_format: form-urlencoded
+        validate_certs: false
+        headers: { 'Cmdbuild-authorization': "{{ sessionid }}" }
+        body:
+          "{{ sp_key.stdout }}"
+
+    - name: Set value of org.cmdbuild.auth.module.saml.sp.cert to "{{ sp_crt.stdout }}"
+      uri:
+        url: "{{ cmdb_server_url }}/cmdbuild/services/rest/v3/system/config/org.cmdbuild.auth.module.saml.sp.cert"
+        method: PUT
+        body_format: form-urlencoded
+        validate_certs: false
+        headers: { 'Cmdbuild-authorization': "{{ sessionid }}" }
+        body:
+          "{{ sp_crt.stdout }}"
+
+    - name: Set value of org.cmdbuild.auth.module.saml.requireSignedAssertions to "False"
+      uri:
+        url: "{{ cmdb_server_url }}/cmdbuild/services/rest/v3/system/config/org.cmdbuild.auth.module.saml.requireSignedAssertions"
+        method: PUT
+        body_format: form-urlencoded
+        validate_certs: false
+        headers: { 'Cmdbuild-authorization': "{{ sessionid }}" }
+        body:
+          "False"
+
+    - name: Set value of org.cmdbuild.auth.module.saml.requireSignedMessages to "False"
+      uri:
+        url: "{{ cmdb_server_url }}/cmdbuild/services/rest/v3/system/config/org.cmdbuild.auth.module.saml.requireSignedMessages"
+        method: PUT
+        body_format: form-urlencoded
+        validate_certs: false
+        headers: { 'Cmdbuild-authorization': "{{ sessionid }}" }
+        body:
+          "False"
+
+    - name: Set value of org.cmdbuild.auth.module.saml.signatureAlgorithm to "RSA_SHA256"
+      uri:
+        url: "{{ cmdb_server_url }}/cmdbuild/services/rest/v3/system/config/org.cmdbuild.auth.module.saml.signatureAlgorithm"
+        method: PUT
+        body_format: form-urlencoded
+        validate_certs: false
+        headers: { 'Cmdbuild-authorization': "{{ sessionid }}" }
+        body:
+          "RSA_SHA256"
+
+    - name: Set value of org.cmdbuild.auth.module.saml.logout.enabled to "False"
+      uri:
+        url: "{{ cmdb_server_url }}/cmdbuild/services/rest/v3/system/config/org.cmdbuild.auth.module.saml.logout.enabled"
+        method: PUT
+        body_format: form-urlencoded
+        validate_certs: false
+        headers: { 'Cmdbuild-authorization': "{{ sessionid }}" }
+        body:
+          "False"
+
+    - name: Set value of org.cmdbuild.auth.module.saml.idp.logout to "{{ keycloak_server_url }}/realms/{{ realm }}/protocol/saml"
+      uri:
+        url: "{{ cmdb_server_url }}/cmdbuild/services/rest/v3/system/config/org.cmdbuild.auth.module.saml.idp.logout"
+        method: PUT
+        body_format: form-urlencoded
+        validate_certs: false
+        headers: { 'Cmdbuild-authorization': "{{ sessionid }}" }
+        body:
+          "{{ keycloak_server_url }}/realms/{{ realm }}/protocol/saml"
+
+    # Set sp.baseUrl
+    - name: Set value of org.cmdbuild.auth.module.saml.sp.baseUrl to "{{ cmdb_base_url }}"
+      uri:
+        url: "{{ cmdb_server_url }}/cmdbuild/services/rest/v3/system/config/org.cmdbuild.auth.module.saml.sp.baseUrl"
+        method: PUT
+        body_format: form-urlencoded
+        validate_certs: false
+        headers: { 'Cmdbuild-authorization': "{{ sessionid }}" }
+        body:
+          "{{ cmdb_base_url }}"
+ 
+    - name: Set value of org.cmdbuild.auth.module.saml.idp.login to "{{ keycloak_server_url }}/realms/{{ realm }}/protocol/saml"
+      uri:
+        url: "{{ cmdb_server_url }}/cmdbuild/services/rest/v3/system/config/org.cmdbuild.auth.module.saml.idp.login"
+        method: PUT
+        body_format: form-urlencoded
+        validate_certs: false
+        headers: { 'Cmdbuild-authorization': "{{ sessionid }}" }
+        body:
+          "{{ keycloak_server_url }}/realms/{{ realm }}/protocol/saml"
+
+    - name: Set value of org.cmdbuild.auth.module.saml.strict to "False"
+      uri:
+        url: "{{ cmdb_server_url }}/cmdbuild/services/rest/v3/system/config/org.cmdbuild.auth.module.saml.strict"
+        method: PUT
+        body_format: form-urlencoded
+        validate_certs: false
+        headers: { 'Cmdbuild-authorization': "{{ sessionid }}" }
+        body:
+          "False"
+
+    # bash ./cmdbuild.sh restws -username admin -password admin setconfig org.cmdbuild.auth.module.saml.handlerScript "login = auth.getNameId()"
+    - name: Set value of org.cmdbuild.auth.module.saml.handlerScript to "login = auth.getNameId()"
+      uri:
+        url: "{{ cmdb_server_url }}/cmdbuild/services/rest/v3/system/config/org.cmdbuild.auth.module.saml.handlerScript"
+        method: PUT
+        body_format: form-urlencoded
+        validate_certs: false
+        headers: { 'Cmdbuild-authorization': "{{ sessionid }}" }
+        body:
+          "login = auth.getNameId()"
+ 
+    # Try to enable saml module
+    - name: Set value of org.cmdbuild.auth.module.saml.enabled to "True"
+      uri:
+        url: "{{ cmdb_server_url }}/cmdbuild/services/rest/v3/system/config/org.cmdbuild.auth.module.saml.enabled"
+        method: PUT
+        body_format: form-urlencoded
+        validate_certs: false
+        headers: { 'Cmdbuild-authorization': "{{ sessionid }}" }
+        body:
+          "True"
+
+    # bash ./cmdbuild.sh restws -username admin -password admin setconfig org.cmdbuild.auth.case.insensitive true
+    - name: Set value of org.cmdbuild.auth.case.insensitive to "True"
+      uri:
+        url: "{{ cmdb_server_url }}/cmdbuild/services/rest/v3/system/config/org.cmdbuild.auth.case.insensitive"
+        method: PUT
+        body_format: form-urlencoded
+        validate_certs: false
+        headers: { 'Cmdbuild-authorization': "{{ sessionid }}" }
+        body:
+          "True"
+      
+    # Werkt goed.
+    - name: Signal CMDBuild to reload system configuration
+      uri:
+        url: "{{ cmdb_server_url }}/cmdbuild/services/rest/v3/system/config/reload"
+        method: GET
+        validate_certs: false
+        headers: { 'Cmdbuild-authorization': "{{ sessionid }}" }
+      register: cmdbreload
+
+    - debug:
+        var: cmdbreload
+
+    # decided to try adding saml to the login modules variable I saw there.
+    # org.cmdbuild.auth.modules=default,saml
+    # The SSO cannot be enabled from the UI, you can do it with the following
+    # command: 
+    #   bash cmdbuild.sh restws -username "{{ cmdb_admin_id }}" -password "{{ cmdb_admin_pw }}" setconfig org.cmdbuild.auth.modules saml,default
+    # (this configuration means that both saml and the default login are enabled)
+    - name: Add SSO to internal db login method
+      uri:
+        url: "{{ cmdb_server_url }}/cmdbuild/services/rest/v3/system/config/org.cmdbuild.auth.modules"
+        method: PUT
+        body_format: form-urlencoded
+        validate_certs: false
+        headers: { 'Cmdbuild-authorization': "{{ sessionid }}" }
+        body:
+          "saml,default"
+
+    - name: Dump current authentication config
+      become: true
+      become_user: tomcat
+      shell:
+        cmd: bash ./cmdbuild.sh restws -username admin -password admin getconfigs | grep auth
+        chdir: /var/lib/tomcat9/webapps/cmdbuild
+      register: authconfig
+
+    - debug:
+        var: authconfig

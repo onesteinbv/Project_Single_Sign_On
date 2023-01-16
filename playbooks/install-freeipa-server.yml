@@ -1,0 +1,153 @@
+---
+- name: Install FreeIPA server
+  hosts: all
+  remote_user: root
+  become: true
+  become_user: root
+  become_method: sudo
+
+  # use this command line: ansible-playbook  -vvv  --ask-pass  --ask-become-pass  setup-new-server.yml  -i 10.1.1.158,  -u jeroen
+
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+
+  tasks:
+    - debug:
+        msg: Readable debug output  export ANSIBLE_STDOUT_CALLBACK=debug
+
+
+    - name: Read global vars
+      include_vars: global-vars.yml
+
+    - name: Read encrypted content
+      include_vars: encrypted-vars.yml
+
+    - name: Set hostname ipa.{{ domain }}
+      ansible.builtin.hostname:
+        name: ipa.{{ domain }}
+
+    # remove 127.0.0.1 ipa.{{ domain }} ipa from /etc/hosts
+    # remove ::1 ipa.{{ domain }} ipa from /etc/hosts
+    - name: Make sure the IPA Server hostname does not resolve to localhost on v4 and v6
+      lineinfile:
+        path: /etc/hosts
+        regexp: ipa.{{ domain }}
+        state: absent
+
+    - name: Add hostname to /etc/hosts
+      blockinfile:
+        path: /etc/hosts
+        block: |
+          {{ item.ip }} {{ item.name }} {{item.shortname}}
+        marker: "# {mark} ANSIBLE MANAGED BLOCK {{ item.name }}"
+      loop:
+        - { name: ipa.{{ domain }}, shortname: ipa, ip: 10.11.1.242 }
+
+    - name: Set timezone to Europe/Amsterdam
+      community.general.timezone:
+        name: Europe/Amsterdam
+
+    - name: Disable selinux
+      shell:
+        cmd: setenforce 0
+
+    - name: edit selinux in /etc/selinux/config
+      ansible.builtin.lineinfile:
+        path: /etc/selinux/config
+        regexp: '^SELINUX='
+        line: SELINUX=permissive
+
+    # yum -y install @idm:DL1  
+    # Using shell module because well, it just didn't work any other way
+    - name: Enable freeipa repo stream 
+      shell:
+        cmd: yum -y install @idm:DL1 
+        warn: false
+
+    # # dnf install freeipa-server
+    # Note that the installed package just contains all the bits that FreeIPA uses, it does not configure the actual server.
+    # If you want to include the DNS server also install the freeipa-server-dns package.
+    # # dnf install freeipa-server-dns
+
+    - name: Install freeipa-server
+      dnf:
+        name: freeipa-server
+        state: latest
+
+    # Configure a FreeIPA server.
+    # The command can take command arguments or can be run in the interactive mode. 
+    # You can get more details with man ipa-server-install. 
+    # To start the interactive installation, run:
+    # ipa-server-install
+    # The command will at first gather all required information and then configure all required services.      
+    - debug:
+        msg: "To start the interactive installation, run: ipa-server-install"
+
+    # Yes, we could automate this with Ansible vault and expect stuff, but we don't
+    
+    # ipa-server-install
+
+    # The log file for this installation can be found in /var/log/ipaserver-install.log
+    #  ======================================================================
+    # This program will set up the IPA Server.
+    # Version 4.9.6
+    # 
+    # This includes:
+    #   * Configure a stand-alone CA (dogtag) for certificate management
+    #   * Configure the NTP client (chronyd)
+    #   * Create and configure an instance of Directory Server
+    #   * Create and configure a Kerberos Key Distribution Center (KDC)
+    #   * Configure Apache (httpd)
+    #   * Configure the KDC to enable PKINIT
+    # 
+    # To accept the default shown in brackets, press the Enter key.
+    # 
+    # Do you want to configure integrated DNS (BIND)? [no]: 
+    # 
+    # Enter the fully qualified domain name of the computer
+    # on which you're setting up server software. Using the form
+    # <hostname>.<domainname>
+    # Example: master.example.com.
+    # 
+    # 
+    # Server host name [ipa.{{ domain }}]: 
+    # 
+    # The domain name has been determined based on the host name.
+    # 
+    # Please confirm the domain name [{{ domain }}]: 
+    # 
+    # The kerberos protocol requires a Realm name to be defined.
+    # This is typically the domain name converted to uppercase.
+    # 
+    # Please provide a realm name [ONESTEIN.LAN]: 
+    # Certain directory server operations require an administrative user.
+    # This user is referred to as the Directory Manager and has full access
+    # to the Directory for system management tasks and will be added to the
+    # instance of directory server created for IPA.
+    # The password must be at least 8 characters long.
+    # 
+    # Directory Manager password: 
+    # Password (confirm): 
+    # 
+    # The IPA server requires an administrative user, named 'admin'.
+    # This user is a regular system account used for IPA server administration.
+    # 
+    # IPA admin password: 
+    # Password (confirm): 
+    # 
+    # Do you want to configure chrony with NTP server or pool address? [no]: 
+    # 
+    # The IPA Master Server will be configured with:
+    # Hostname:       ipa.{{ domain }}
+    # IP address(es): 10.11.1.242
+    # Domain name:    {{ domain }}
+    # Realm name:     ONESTEIN.LAN
+    # 
+    # The CA will be configured with:
+    # Subject DN:   CN=Certificate Authority,O=ONESTEIN.LAN
+    # Subject base: O=ONESTEIN.LAN
+    # Chaining:     self-signed
+    # 
+    # Continue to configure the system with these values? [no]: yes
+    #
+    

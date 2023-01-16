@@ -10,30 +10,40 @@
 
   vars:
     root_ca_path: /usr/local/share/ca-certificates/mkcert_development_CA_62268663181785622328732999788222374785.crt
-    bitwarden_server_url: "https://password.{{ domain }}"
+    bitwarden_server_url: https://password.{{ domain }}
+    #bitwarden_client_id: "client-bitwarden-{{ ansible_fqdn }}" 
     bitwarden_client_id: "{{ bitwarden_server_url }}/sso/saml2"
     bitwarden_client_name: "client-bitwarden-{{ ansible_fqdn }}"
+    keycloak_server_url: https://ad.{{ domain }}
 
   tasks:
   - name: test connection to host
     ping:
 
+  - name: Read global vars
+    include_vars: global-vars.yml
+
   - name: Read encrypted content
     include_vars: encrypted-vars.yml
 
-  - name: Read content
-    include_vars: global-vars.yml
+  - name: TIP
+    debug:
+      msg: Do yourself a favour; export ANSIBLE_STDOUT_CALLBACK=debug
 
  
   # We need the uuid of the organization, so ask this from the command line
   - fail:
       msg: |
-        =====================================================================
+        ==========================================================================
         Fatal: We need the client_id from the organization API key!
                Read the last part of the install-bitwarden-sso.yml playbook
                and rerun while adding the correct argument as shown next
                "-e client_id=organization.3f0c3962-29d3-11ed-bc12-07773c74e67b"
-        =====================================================================
+               You can find this id as follows
+               Login to BitWarden, open your organization.
+               Go to "Settings" -> "My Organization" and click on the
+               "View API Key" button. Copy the information shown under "client_id"
+        ==========================================================================
     when: client_id is not defined
 
   - name: We need to get the uuid part of the client_id
@@ -60,7 +70,7 @@
  # Generate a key on the Bitwarden server
   - name: Generate key on Bitwarden server
     shell:
-      cmd: /usr/bin/openssl req -x509 -sha256 -newkey rsa:2048 -keyout sp.key -out sp.crt -days 3650 -nodes -subj "/CN={{ domain }}"
+      cmd: /usr/bin/openssl req -x509 -sha256 -newkey rsa:2048 -keyout sp.key -out sp.crt -days 3650 -nodes -subj '/CN={{ domain }}'
       chdir: /tmp
 
 
@@ -93,7 +103,7 @@
     set_fact:
       authorization_endpoint: "{{ endpointinfo.json[\"authorization_endpoint\"] }}"
 
-  # "authorization_endpoint": "https://ad.onestein.lan/realms/ONESTEIN.LAN/protocol/openid-connect/auth",
+  # "authorization_endpoint": "https://ad.{{ domain }}/realms/ONESTEIN.LAN/protocol/openid-connect/auth",
   - debug:
       var: authorization_endpoint
 
@@ -119,8 +129,8 @@
       body:
         realm: master
         client_id: admin-cli
-        username: "{{ kc_kc_adminid }}"
-        password: "{{ kc_kc_adminpw }}"
+        username: "{{ kc_adminid }}"
+        password: "{{ kc_adminpw }}"
         grant_type: password
     register: authtoken
 
@@ -138,7 +148,7 @@
       var: auth_token  
 
   # Retrieve IDP metadata descriptor and copy the 509 formatted certificate
-  # https://ad.onestein.lan/realms/ONESTEIN.LAN/protocol/saml/descriptor
+  # https://ad.{{ domain }}/realms/ONESTEIN.LAN/protocol/saml/descriptor
   - name: Retrieve IDP metadata descriptor to use the 509 formatted certificate
     uri:
       url: "{{ keycloak_server_url }}/realms/{{ realm }}/protocol/saml/descriptor"
@@ -208,7 +218,7 @@
 
   # Retrieve current list of clients of our type
   # So, this works in curl:
-  # curl -k -v -H "Accept: application/json" -H "Authorization: Bearer ${access_token}" "https://ad.onestein.lan:8443/admin/realms/master/clients" | jq .
+  # curl -k -v -H "Accept: application/json" -H "Authorization: Bearer ${access_token}" "https://ad.{{ domain }}:8443/admin/realms/master/clients" | jq .
   - name: Retrieve current list of clients and search for already existing "{{ bitwarden_client_id }} "
     uri:
       url: "{{ keycloak_server_url }}/admin/realms/{{ realm }}/clients?clientId={{ bitwarden_client_id }}"
@@ -297,7 +307,7 @@
         * - Login to your BitWarden server and open your Organization.
         *
         * - Open the Settings tab and enter the following unique Identifier 
-        *   for your organization "{{ bw_organization_id }}"
+        *   for your organization "{{ organization_id }}"
         *
         * Once you have your Organization Identifier, you can proceed to 
         * enabling and configuring your integration. To enable Login with SSO
@@ -308,9 +318,9 @@
         * - From the Type dropdown menu, select the "SAML 2.0" option.
         * 
         * == SAML Service Provider Configuration ==
-        * - SP Entity ID should read "{{ bitwarden_server_url }}/sso/saml2"
-        * - SAML 2.0 Metadata URL should start with "{{ bitwarden_server_url }}/sso/saml2/"
-        * - Assertion Consumer Service (ACS) URL should start with "{{ bitwarden_server_url }}/sso/saml2"
+        * - SP Entity ID should read "https://password.{{ domain }}/sso/saml2"
+        * - SAML 2.0 Metadata URL should start with "https://password.{{ domain }}/sso/saml2/"
+        * - Assertion Consumer Service (ACS) URL should start with "https://password.{{ domain }}/sso/saml2"
         * - Set Name ID Format to "Email Address"
         * - Outbound Signing Algorithm should end with "rsa-sha256"
         * - Signing Behaviour should be "If IdP Wants Authn Requests Signed"
@@ -328,7 +338,7 @@
         * - Uncheck checkbox "Allow outbound logout requests".
         * - Uncheck checkbox "Sign authentication requests".
         *
-        * Go to top menu 'Vaults' -> "{{ bw_organization_name }}".
+        * Go to top menu 'Vaults' -> "{{ organization_name }}".
         * Click the 3 dots to the right of the organization name and click on 'Link SSO'.
         *
         * Notes; BitWarden allows per-organization logins based on valid redirect URLs containing 

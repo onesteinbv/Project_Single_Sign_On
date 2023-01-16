@@ -9,25 +9,20 @@
 
   vars:
     root_ca_path: /usr/local/share/ca-certificates/mkcert_development_CA_62268663181785622328732999788222374785.crt
-    bitwarden_server_url: "https://password.{{ domain }}"
-    bitwarden_client_id: "{{ bitwarden_server_url }}/sso/saml2"
-    bitwarden_client_name: "client-bitwarden-{{ ansible_fqdn }}"
     bitwarden_client_id: "client-bitwarden-{{ ansible_fqdn }}"
-    bitwarden_server_url: "https://password.{{ domain }}"
+    bitwarden_client_name: "client-bitwarden-{{ ansible_fqdn }}"
+    bitwarden_server_url: https://password.{{ domain }}
+    keycloak_server_url: https://ad.{{ domain }}
 
   tasks:
   - name: test connection to host
     ping:
 
+  - name: Read global vars
+    include_vars: global-vars.yml
+
   - name: Read encrypted content
     include_vars: encrypted-vars.yml
-
-  - name: Set variable bitwarden_client_id to "client-bitwarden-{{ ansible_fqdn }}"
-    set_fact:
-      bitwarden_client_id: "client-bitwarden-{{ ansible_fqdn }}"
-
-  - name: Set variable xwiki_client_name to "client-bitwarden-{{ ansible_fqdn }}"
-    set_fact:
 
   - name: Set timezone to Europe/Amsterdam
     timezone:
@@ -176,7 +171,7 @@
   # Docker version 20.10.17, build 100c701
   # docker-compose version 1.25.0, build unknown
   # 
-  # (!) Enter the domain name for your Bitwarden instance (ex. bitwarden.example.com): password.onestein.lan
+  # (!) Enter the domain name for your Bitwarden instance (ex. bitwarden.example.com): password.{{ domain }}
   # 
   # (!) Do you want to use Let's Encrypt to generate a free SSL certificate? (y/n): n
   # 
@@ -282,10 +277,10 @@
   # ssl_ca_path: <path>
   #
   # Make sure SSL filenames are correct
-  # ssl_certificate_path: /etc/ssl/self/password.onestein.lan/certificate.crt
+  # ssl_certificate_path: /etc/ssl/self/password.{{ domain }}/certificate.crt
   # Note: Path uses the container's ssl directory. The `./ssl` host directory is mapped to
   # `/etc/ssl` within the container.
-  # ssl_key_path: /etc/ssl/self/password.onestein.lan/private.key
+  # ssl_key_path: /etc/ssl/self/password.{{ domain }}/private.key
   # Note: Path uses the container's ssl directory. The `./ssl` host directory is mapped to
   # `/etc/ssl` within the container.
   # ssl_ca_path: 

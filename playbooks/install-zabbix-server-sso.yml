@@ -12,7 +12,8 @@
     ansible_python_interpreter: /usr/bin/python3
     supported_distros: "{{ ansible_distribution }} {{ ansible_distribution_major_version }}"
     zabbix_repo: zabbix-release_5.4-1+ubuntu20.04_all.deb
-    zabbix_server_url: "https://zabbix.{{ domain }}"
+    keycloak_server_url: https://ad.{{ domain }}
+    zabbix_server_url: https://zabbix.{{ domain }}
     zabbix_client_id: "client-zabbix-{{ ansible_fqdn }}"
     zabbix_client_name: "client-zabbix-{{ ansible_fqdn }}"
 
@@ -20,11 +21,11 @@
     - debug:
         msg: Readable debug output  export ANSIBLE_STDOUT_CALLBACK=debug
 
+    - name: Read global vars
+      include_vars: global-vars.yml
+
     - name: Read encrypted content
       include_vars: encrypted-vars.yml
-
-    - name: Read global variables
-      include_vars: global-vars.yml
 
     - name: check if server is Ubuntu 20.04
       fail: msg='Unsupported platform! This playbook is for Ubuntu 20.04!'
@@ -138,13 +139,18 @@
         dest: /etc/nginx/sites-available/default 
 
 
-    # Docs describing a working setup. Zabbix currently only supports SAML out of the box.
+    # Docs describing a working setup. Zabbix currently only supports SAML out
+    # of the box.
     # https://www.techrunnr.com/how-to-integrate-keycloak-with-zabbix-for-sso-saml/
+    # Actually, the above sucks when you sync user profiles from LDAP bc it will
+    # override the user attribute described in this setup.  Take the effort and
+    # read https://blog.devarieux.net/2021/12/zabbix-saml-keycloak-google.html
+    # for a better working solution.
 
     # Generate a key on the Zabbix server
     - name: Generate key on Zabbix server
       shell:
-        cmd: /usr/bin/openssl req -x509 -sha256 -newkey rsa:2048 -keyout sp.key -out sp.crt -days 3650 -nodes -subj "/CN={{ domain }}"
+        cmd: /usr/bin/openssl req -x509 -sha256 -newkey rsa:2048 -keyout sp.key -out sp.crt -days 3650 -nodes -subj '/CN={{ domain }}'
         chdir: /usr/share/zabbix/conf/certs
 
     # Start getting auth token      
@@ -176,7 +182,7 @@
       set_fact:
         authorization_endpoint: "{{ endpointinfo.json[\"authorization_endpoint\"] }}"
 
-    # "authorization_endpoint": "https://ad.onestein.lan/realms/ONESTEIN.LAN/protocol/openid-connect/auth",
+    # "authorization_endpoint": "https://ad.{{ domain }}/realms/ONESTEIN.LAN/protocol/openid-connect/auth",
     - debug:
         var: authorization_endpoint
 
@@ -202,8 +208,8 @@
         body:
           realm: master
           client_id: admin-cli
-          username: "{{ kc_adminid }}"
-          password: "{{ kc_adminpw }}"
+          username: "{{kc_adminid }}"
+          password: "{{kc_adminpw }}"
           grant_type: password
       register: authtoken
 
@@ -222,7 +228,7 @@
 
 
     # Retrieve IDP metadata descriptor and copy the 509 formatted certificate
-    # https://ad.onestein.lan/realms/ONESTEIN.LAN/protocol/saml/descriptor
+    # https://ad.{{ domain }}/realms/ONESTEIN.LAN/protocol/saml/descriptor
     - name: Retrieve IDP metadata descriptor to use the 509 formatted certificate
       uri:
         url: "{{ keycloak_server_url }}/realms/{{ realm }}/protocol/saml/descriptor"
@@ -277,7 +283,7 @@
 
     # Retrieve current list of clients of our type
     # So, this works in curl:
-    # curl -k -v -H "Accept: application/json" -H "Authorization: Bearer ${access_token}" "https://ad.onestein.lan:8443/admin/realms/master/clients" | jq .
+    # curl -k -v -H "Accept: application/json" -H "Authorization: Bearer ${access_token}" "https://ad.{{ domain }}:8443/admin/realms/master/clients" | jq .
     - name: Retrieve current list of clients and search for already existing "{{ zabbix_client_id }} "
       uri:
         url: "{{ keycloak_server_url }}/admin/realms/{{ realm }}/clients?clientId={{ zabbix_client_id }}"
@@ -375,7 +381,7 @@
       register: createclientresult
    
     # Good news! Result contains location of new client id in location
-    # Example: "location": "https://ad.onestein.lan:8443/admin/realms/ONESTEIN.LAN/clients/e01a87cf-537c-441e-b6ee-17f4cd07d92c"
+    # Example: "location": "https://ad.{{ domain }}:8443/admin/realms/ONESTEIN.LAN/clients/e01a87cf-537c-441e-b6ee-17f4cd07d92c"
     - name: If all went well we now have a locaton of the newly created Client ID
       debug:
         var: createclientresult.location
@@ -398,7 +404,7 @@
         msg: |  
           **********************************************************************************************************
           * After a fresh installation of Zabbix you need to run the setup process.
-          * Visit "{{ zabbix_server_url }}" and follow the wizzard.
+          * Visit zabbix.{{ domain }}
           * Database type is PostgreSQL and database password is 'zabbix'.
           * Al other default choices are ok.
           *
@@ -408,18 +414,18 @@
           * - Set IdP entity ID to "{{ keycloak_server_url }}/realms/{{ realm }}"
           * - Set SSO service URL to "{{ keycloak_server_url }}/realms/{{ realm }}/protocol/saml"
           * - Set SLO service URL to "{{ keycloak_server_url }}/realms/{{ realm }}/protocol/saml"
-          * - Set Username attribute to 'zabbixuser'
+          * - Set Username attribute to 'email'
           * - Set SP entity ID to "{{ zabbix_client_id }}"
           * - Set SP name ID format to 'urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress'
           * - Click on the 'Update' button at the bottom.
           *
           * Configure users in Zabbix to use SAML
           * - Make sure every Zabbix user account is in email address format user@fqdn.
-          * - In Keycloak make sure every user has in his or hers 'Attributes'-tab an attribute called 'zabbixuser' 
+          * - In Keycloak make sure every user has in the Attributes tab an attribute called 'zabbixuser' 
           *   containing that same email address.
           * 
           * Now login to Zabbix not by entering userid/password.
-          * But by clicking on the 'Sign in with Single Sign-On (SAML)' link below.
+          * But by clicking on the 'Sign in with Single Sign-On (SAML)' link.
           **********************************************************************************************************
 
 

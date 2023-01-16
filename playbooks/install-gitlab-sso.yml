@@ -2,34 +2,39 @@
 - name: Install gitlab on Ubuntu 20.04
   hosts: grpgitlab
   remote_user: root
+  become: true
+  become_user: root
+  become_method: sudo
 
-  # use this command line: ansible-playbook  -vvv  --ask-pass  --ask-become-pass  setup-new-server.yml  -i 10.1.1.158,  -u jeroen
   # Execute ansible-playbook playbookfile.yml -i hosts --vault-password-file .vault-password
 
   vars:
     ansible_python_interpreter: /usr/bin/python3
     root_ca_path: /usr/local/share/ca-certificates/mkcert_development_CA_62268663181785622328732999788222374785.crt
-    gitlab_server_url: "https://gitlab.{{ domain }}"
     gitlab_client_id: "client-gitlab-{{ ansible_fqdn }}"
     gitlab_client_name: "client-gitlab-{{ ansible_fqdn }}"
-
+    gitlab_server_url: https://gitlab.{{ domain }}
+    keycloak_server_url: https://ad.{{ domain }}
+    realm: "{{ realm }}"
 
   tasks:
     - debug:
         msg: Readable debug output  export ANSIBLE_STDOUT_CALLBACK=debug
 
-    - name: Read encrypted content
-      include_vars: encrypted-vars.yml
-
-    - name: Read global variables
+    - name: Read global vars
       include_vars: global-vars.yml
 
+    - name: Read encrypted content
+      include_vars: encrypted-vars.yml
 
     - name: Shutdown GitLab if already exists and ignore any errors
       shell:
         cmd: gitlab-ctl stop
       ignore_errors: yes
 
+    - name: Set timezone to Europe/Amsterdam
+      community.general.timezone:
+        name: Europe/Amsterdam
 
     # Install all needed software in one go.
     # apt install -y ca-certificates curl openssh-server
@@ -37,6 +42,7 @@
       apt:
         name: "{{ item }}"
         state: present
+        update_cache: yes
       loop:
         - ca-certificates
         - curl
@@ -104,16 +110,12 @@
       apt:
         name: gitlab-ce
 
-    - name: Set timezone to Europe/Amsterdam
-      community.general.timezone:
-        name: Europe/Amsterdam
-
     # fix external_url 'http://gitlab.example.com'
     - name: Configure gitlab-ce url
       lineinfile:
         path: /etc/gitlab/gitlab.rb
         regexp: "external_url.*"
-        line: "external_url '{{ gitlab_server_url }}'"
+        line: "external_url 'https://gitlab.{{ domain }}'"
 
     # Disable GitLab LetsEncrypt support as mentioned on their page
     # letsencrypt['enable'] = false in /etc/gitlab/gitlab.rb
@@ -124,6 +126,34 @@
         line: letsencrypt['enable'] = false 
         state: present
 
+    # 1  Create the certificate(s)
+    # 2  Place a copy or symlink of the CA's public certificate in /etc/gitlab/trusted-certs/
+    #        cp $(mkcert -CAROOT)/rootCA.pem /etc/gitlab/trusted-certs/rootCA.pem
+    # 3  Reconfigure GitLab so this CA certificate is included into the GitLab instance's certificate store
+    #        gitlab-ctl reconfigure
+    # 4  Confirm the certificate is now in the store, using the embedded openssl
+    #        /opt/gitlab/embedded/bin/openssl s_client -connect localhost:443 </dev/null
+    #        The output should contain detailed information, such as the certificate chain, ordering, and a line such as Verify return code: 0 (ok)
+    #
+    #Your server certificates should be placed at:
+    #
+    #    /etc/gitlab/ssl/hostname.crt
+    #    /etc/gitlab/ssl/hostname.key
+
+    - name: Create /etc/gitlab/trusted-certs/ directory
+      ansible.builtin.file:
+        path: /etc/gitlab/trusted-certs
+        state: directory
+        mode: '0755'
+
+    - name: Upload CA key and cert into gitlab trusted-certs store
+      copy:
+        src: "files/rootCA.pem"
+        dest: "/etc/gitlab/trusted-certs/rootCA.pem"
+        owner: root
+        group: root
+        mode: '0644'
+        force: true
 
     # Copy SSL files to gitlab /opt/gitlab/embedded/ssl/certs 
     # To set the location of ssl certificates create /etc/gitlab/ssl directory, 
@@ -151,20 +181,6 @@
         group: root
         mode: '0600'
 
-    # nginx['ssl_certificate'] = "/etc/gitlab/ssl/gitlab.example.com.crt"
-    - name: Configure fixed SSL cert file
-      lineinfile:
-        path: /etc/gitlab/gitlab.rb
-        regexp: ".*nginx['ssl_certificate'].*"
-        line: "nginx['ssl_certificate'] = \"/etc/gitlab/ssl/gitlab.{{ domain }}.crt\""
- 
-    # nginx['ssl_certificate_key'] = "/etc/gitlab/ssl/gitlab.example.com.key"
-    - name: Configure fixed SSL cert key file
-      lineinfile:
-        path: /etc/gitlab/gitlab.rb
-        regexp: ".*nginx['ssl_certificate_key'].*"
-        line: "nginx['ssl_certificate_key'] = \"/etc/gitlab/ssl/gitlab.{{ domain }}.key\""
- 
     # Remove old LDAP stuff
     # gitlab_rails['ldap_enabled'] = true
     - name: Remove if enable ldap setting in GitLab config file
@@ -174,11 +190,11 @@
         state: absent
     
     # gitlab_rails['ldap_servers'] = YAML.load_file('/etc/gitlab/gitlab_freeipa_settings.yml')
-#   - name: Remove if exists reference to LDAP settings file
-#     lineinfile:
-#       path: /etc/gitlab/gitlab.rb
-#       line: "gitlab_rails['ldap_servers'].*"
-#       state: absent
+    - name: Remove if exists reference to LDAP settings file
+      lineinfile:
+        path: /etc/gitlab/gitlab.rb
+        line: "gitlab_rails['ldap_servers'].*"
+        state: absent
 
     # Retrieve token url needed.  Returns JSON payload with var token-service.
     - name: Retrieve token url from server
@@ -208,7 +224,7 @@
       set_fact:
         authorization_endpoint: "{{ endpointinfo.json[\"authorization_endpoint\"] }}"
 
-    # "authorization_endpoint": "https://ad.onestein.lan/realms/ONESTEIN.LAN/protocol/openid-connect/auth",
+    # "authorization_endpoint": "https://ad.{{ domain }}/realms/ONESTEIN.LAN/protocol/openid-connect/auth",
     - debug:
         var: authorization_endpoint
 
@@ -234,8 +250,8 @@
         body:
           realm: master
           client_id: admin-cli
-          username: "{{ kc_kc_adminid }}"
-          password: "{{ kc_kc_adminpw }}"
+          username: "{{ kc_adminid }}"
+          password: "{{ kc_adminpw }}"
           grant_type: password
       register: authtoken
 
@@ -258,7 +274,7 @@
     
     # Retrieve current list of clients of our type
     # So, this works in curl:
-    # curl -k -v -H "Accept: application/json" -H "Authorization: Bearer ${access_token}" "https://ad.onestein.lan:8443/admin/realms/master/clients" | jq .
+    # curl -k -v -H "Accept: application/json" -H "Authorization: Bearer ${access_token}" "https://ad.{{ domain }}:8443/admin/realms/master/clients" | jq .
     - name: Retrieve current list of clients and search for already existing "{{ gitlab_client_id }} "
       uri:
         url: "{{ keycloak_server_url }}/admin/realms/{{ realm }}/clients?clientId={{ gitlab_client_id }}"
@@ -293,9 +309,6 @@
       set_fact:
         jsonbody: "{{ lookup('template', 'gitlab-keycloak-sso.json.j2') }}"
 
-#   - debug:
-#       var: jsonbody
-
     # Generate the json payload to upload
     - name: Upload JSON template file to create new Client ID on Keycloak server
       uri:
@@ -311,7 +324,7 @@
       register: createclientresult
    
     # Good news! Result contains location of new client id in location
-    # Example: "location": "https://ad.onestein.lan:8443/admin/realms/ONESTEIN.LAN/clients/e01a87cf-537c-441e-b6ee-17f4cd07d92c"
+    # Example: "location": "https://ad.{{ domain }}:8443/admin/realms/ONESTEIN.LAN/clients/e01a87cf-537c-441e-b6ee-17f4cd07d92c"
     - name: If all went well we now have a locaton of the newly created Client ID
       debug:
         var: createclientresult.location
@@ -358,17 +371,6 @@
         line: "gitlab_rails['omniauth_block_auto_created_users'] = true"
         #line: "gitlab_rails['omniauth_block_auto_created_users'] = false"
 
-    # Numerous openid connect errors about ssl cert verify failed seem to go away with this line
-    # https://forum.gitlab.com/t/500-error-after-keycloak-login-certificate-verify-failed-unable-to-get-local-issuer-certificate/49065/6
-    - name: Add pointer to undefined SSL_CERT_FILE to fix ssl cert verify failed errors
-      lineinfile:
-        path: /etc/gitlab/gitlab.rb
-        regexp: ".*gitlab_rails['env'].*"
-        line: "gitlab_rails['env'] = {\"SSL_CERT_FILE\" => \"/etc/ssl/certs/ca-certificates.crt\"}"
-
-    # TODO Do we need this?
-    # gitlab_rails['omniauth_auto_link_user'] = ['openid_connect']
- 
     # Trust me on this. Getting this to work is a PITA!
     # Ensure discovery is set to true. Setting it to false requires specifying all the URLs and keys required to make OpenID work
     - name: Insert/Update 'omniauth_providers' configuration block in /etc/gitlab/gitlab.rb
@@ -384,7 +386,7 @@
               name: "openid_connect",
               scope: ["openid","profile","email"],
               response_type: "code",
-              issuer: "{{ keycloak_server_url }}/realms/{{ realm }}",
+              issuer: "https://ad.{{ domain }}/realms/{{ realm }}",
               discovery: true,
               client_auth_method: "query",
               uid_field: "sub",
@@ -392,7 +394,7 @@
               client_options: {
                 identifier: "{{ gitlab_client_id }}",
                 secret: "{{ client_secret }}",
-                redirect_uri: "{{ gitlab_server_url }}/users/auth/openid_connect/callback"
+                redirect_uri: "https://gitlab.{{ domain }}/users/auth/openid_connect/callback"
               }
             }
           } ]
@@ -410,7 +412,7 @@
 
     - name: Wait for port 443 to become open on the host
       uri:
-        url: "{{ gitlab_server_url }}/users/sign_in"
+        url: "https://gitlab.{{ domain }}/users/sign_in"
         status_code: 200
       register: result
       until: result.status == 200
@@ -421,13 +423,28 @@
     - debug:
         msg: "Done waiting for 443"
 
-    # Are we really done now?
+    - name: Check openssl config
+      shell:
+        cmd: /opt/gitlab/embedded/bin/openssl s_client -connect localhost:443 </dev/null
+      register: opensslconf
 
-    # Tip? 
-    # gitlab-ctl stop ; export GITLAB_LOG_LEVEL=debug ; gitlab-ctl start ; gitlab-ctl tail
-    # or add to gitlab.rb:
-    # registry['log_level'] = 'info'
-    # gitlab_shell['log_level'] = 'INFO'
-    # gitaly['logging_level'] = 'warn'
-    
+    - debug:
+        var: opensslconf    
+
+    - name: Post-install message IT IS IMPORTANT TO READ THIS
+      pause:
+        seconds: 1
+        prompt: |
+          ********************************************************************************************************
+          * After a fresh installation of GitLab some tips might be helpful.
+          * If this is a fresh install, you can login directly using username root and password as mentioned in the
+          * file /etc/gitlab/initial_root_password.
+          * How to debug: gitlab-ctl stop ; export GITLAB_LOG_LEVEL=debug ; gitlab-ctl start ; gitlab-ctl tail
+          * or you can add to /etc/gitlab/gitlab.rb lines like the following
+          * registry['log_level'] = 'info'
+          * or gitlab_shell['log_level'] = 'INFO'
+          * or gitaly['logging_level'] = 'warn'
+          * When users get the message "Sign-in failed because email has already been taken" the user needs to link
+          * his account to the SSO server. Please see https://docs.gitlab.com/ee/user/group/saml_sso/index.html#user-access-and-management
+
 

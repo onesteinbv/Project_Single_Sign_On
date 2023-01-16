@@ -24,9 +24,9 @@
     - debug:
         msg: |
           *************************************************************************************
-          * We assume you have setup Odoo using the playbook at the below url
-          * https://github.com/onesteinbv/ansible-playbooks
-          * There are some rudimentory checks to check for this.
+          * We assume you have setup Odoo using the playbook at the following url;
+          *   https://github.com/onesteinbv/ansible-playbooks
+          * There are some rudimentory checks to check this.
           *************************************************************************************
 
     - name: Check if /opt/odoo/odoo-server/odoo-bin exists

@@ -2,28 +2,33 @@
 - name: Install Jenkins
   hosts: grpjenkins
   remote_user: root
+  become: true
+  become_user: root
+  become_method: sudo
 
+  # use this command line: ansible-playbook  -vvv  --ask-pass  --ask-become-pass  setup-new-server.yml  -i 10.1.1.158,  -u jeroen
   # Execute ansible-playbook playbookfile.yml -i hosts --vault-password-file .vault-password
   # Online doc: https://rafaelit.blog/2021/10/04/openid-connect-jenkins-with-keycloak/
 
   vars:
     ansible_python_interpreter: /usr/bin/python3
     root_ca_path: /usr/local/share/ca-certificates/mkcert_development_CA_62268663181785622328732999788222374785.crt
-    jenkins_server_fqdn: "jenkins.{{ domain }}"
-    jenkins_server_url: "https://{{ jenkins_server_fqdn }}"
     jenkins_client_id: "client-jenkins-{{ ansible_fqdn }}"
     jenkins_client_name: "client-jenkins-{{ ansible_fqdn }}"
+    jenkins_server_url: https://jenkins.{{ domain }}
+    keycloak_server_url: https://ad.{{ domain }}
+    realm: "{{ realm }}"
 
   tasks:
 
     - debug:
         msg: "Readable debug output  export ANSIBLE_STDOUT_CALLBACK=debug"
 
+    - name: Read global vars
+      include_vars: global-vars.yml
+
     - name: Read encrypted content
       include_vars: encrypted-vars.yml
-
-    - name: Read global variables
-      include_vars: global-vars.yml
 
     - set_fact:
         fqdn: "{{ inventory_hostname_short  }}.{{ domain }}"
@@ -68,12 +73,27 @@
         - autopostgresqlbackup
         - jenkins
         - nginx
- 
+
+#   - name: Disable Jenkins useSecurity in /var/lib/jenkins/config.xml so we can edit the configuration at the end of this playbook.
+#     lineinfile:
+#       path: /var/lib/jenkins/config.xml 
+#       regexp: ".*<useSecurity>.*</useSecurity>"
+#       line: '  <useSecurity>false</useSecurity>'
+
     - name: Enable and start if not running Jenkins
       systemd:
         name: jenkins
         state: started
         enabled: yes
+
+    - name: Upload vanilla Jenkins config.xml.vanilla file, just in case.
+      copy:
+        src: files/jenkins_vanilla_config.xml
+        dest: /var/lib/jenkins/config.xml.vanilla
+        owner: jenkins
+        group: jenkins
+        mode: '0644'
+        force: true
 
 
     # Now install Nginx
@@ -126,11 +146,10 @@
 
  
     # Install nginx config file
-    # TODO: Add SSL support.
     - name: Install nginx config file
       template:
         src: templates/jenkins_nginx_sso.conf.j2
-        dest: /etc/nginx/sites-available/default
+        dest: /etc/nginx/sites-available/jenkins
         # Do not overwrite when file already exists!!!
         force: no
         owner: root
@@ -166,7 +185,7 @@
       set_fact:
         authorization_endpoint: "{{ endpointinfo.json[\"authorization_endpoint\"] }}"
 
-    # "authorization_endpoint": "https://ad.onestein.lan/realms/ONESTEIN.LAN/protocol/openid-connect/auth",
+    # "authorization_endpoint": "https://ad.{{ domain }}/realms/ONESTEIN.LAN/protocol/openid-connect/auth",
     - debug:
         var: authorization_endpoint
 
@@ -192,8 +211,8 @@
         body:
           realm: master
           client_id: admin-cli
-          username: "{{ kc_kc_adminid }}"
-          password: "{{ kc_kc_adminpw }}"
+          username: "{{ kc_adminid }}"
+          password: "{{ kc_adminpw }}"
           grant_type: password
       register: authtoken
 
@@ -216,7 +235,7 @@
     
     # Retrieve current list of clients of our type
     # So, this works in curl:
-    # curl -k -v -H "Accept: application/json" -H "Authorization: Bearer ${access_token}" "https://ad.onestein.lan:8443/admin/realms/master/clients" | jq .
+    # curl -k -v -H "Accept: application/json" -H "Authorization: Bearer ${access_token}" "https://ad.{{ domain }}:8443/admin/realms/master/clients" | jq .
     - name: Retrieve current list of clients and search for already existing "{{ jenkins_client_id }} "
       uri:
         url: "{{ keycloak_server_url }}/admin/realms/{{ realm }}/clients?clientId={{ jenkins_client_id }}"
@@ -299,12 +318,11 @@
 #       var: client_representation 
 
 #   # Good news! Result contains location of new client id in location
-#   # Example: "location": "https://ad.onestein.lan:8443/admin/realms/ONESTEIN.LAN/clients/e01a87cf-537c-441e-b6ee-17f4cd07d92c"
+#   # Example: "location": "https://ad.{{ domain }}:8443/admin/realms/ONESTEIN.LAN/clients/e01a87cf-537c-441e-b6ee-17f4cd07d92c"
 #   - name: If all went well we now have a locaton of the newly created Client ID
 #     debug:
 #       var: createclientresult.location
 
-    # After importing this to Keycloak, you have to generate a new Client-Secret and put it into gitabl.rb file .
     # GET /{realm}/clients/{id}/client-secret
     - name: Retrieve secret for newly created client "{{ jenkins_client_id }} "
       uri:
@@ -370,14 +388,6 @@
       debug:
         var: groupinfo
 
-#   - name: Store secret for easy retrieval
-#     set_fact:
-#       client_secret: "{{ clientsecret.json.value }}"
-
-#   - debug: 
-#       msg: "Success - Group 'Jenkins-admin' defined =>{{  (json_response.content|from_json)['scripts']['test'] }}<="  
-#     when:  (kc_groups.content|from_json)['scripts']['test']  is defined    
-    
     # Create groups if not exist, else ignore errors    
     - name: Create groups Jenkins-admin and Jenkins-user or ignore errors
       uri:
@@ -410,14 +420,6 @@
         var: kc_groups
 
     #- fail:
-
-    - name: Install nginx reverse proxy virtualhost for Keycloak 
-      copy:
-        src: "files/jenkins_nginx.conf"
-        dest: "/etc/nginx/sites-available/keycloak"
-        owner: root
-        group: root
-        mode: '0600'
 
     # Create symlink ln -s /etc/nginx/sites-available/jenkins /etc/nginx/sites-enabled/
     - name: Enable virtualhost in nginx
@@ -452,13 +454,13 @@
         - _wildcard.{{ domain }}.pem
         - _wildcard.{{ domain }}-key.pem
 
-    - name: Install Nginx reverse proxy virtualhost for Keycloak 
-      copy:
-        src: "files/jenkins_nginx.conf"
-        dest: "/etc/nginx/sites-available/jenkins"
-        owner: root
-        group: root
-        mode: '0600'
+#   - name: Install Nginx reverse proxy virtualhost for Keycloak 
+#     copy:
+#       src: "files/jenkins_nginx.conf"
+#       dest: "/etc/nginx/sites-available/jenkins"
+#       owner: root
+#       group: root
+#       mode: '0600'
 
     - name: Enable and restart always Nginx
       systemd:
@@ -471,7 +473,7 @@
 
     - name: Wait for port 443 to become open on the host
       uri:
-        url: "{{ jenkins_server_url }}"
+        url: "https://jenkins.{{ domain }}/"
         status_code: 403
       register: result
       until: result.status == 403
@@ -489,10 +491,12 @@
       slurp:
         src: "/var/lib/jenkins/secrets/initialAdminPassword"
       register: admin_password_encoded
+      ignore_errors: yes
 
     - name: Decode initialAdminPassword 
       set_fact:
-        admin_password: "{{ admin_password_encoded.content | b64decode }}"
+        admin_password: "{{ admin_password_encoded.content | b64decode | trim }}"
+      ignore_errors: yes
 
     # Create post-install message
     - name: test
@@ -500,8 +504,9 @@
         msg: "test"
 
     - name: Post-install message IT IS IMPORTANT TO READ THIS
-      debug:
-        msg: |  
+      pause:
+        seconds: 1
+        prompt: |
           ********************************************************************************************************
           * After a fresh installation Jenkins offers no way to configure SSO using Ansible or the command line.
           * Sure you can enable remote admin options, but you might just as well configure SSO from the GUI.
@@ -544,12 +549,36 @@
           * - Just below the "Advanced" part is the "Authorization" section.
           * - Select the "Matrix-based security" option.
           * - Click on "Add group..." and add two groups.
-          *   Group "/Jenkins-admin" (Note the leading "/"!) with All (!) "Global/Administer" rights
-          *   Group "/Jenkins-user" (Note the leading "/"!) with "Global/Read" rights
+          *   Group "/Jenkins-admin" (Note the leading "/"!) with All (!) "Overall/Administer" rights
+          *   Group "/Jenkins-user" (Note the leading "/"!) with "Overall/Read" rights
           * - Save this change by clicking on the 'Save' button at the bottom of the page. It will redirect you to the 'Manage Jenkins' page.
           * - Based on the current settings you have no longer access rights. Logout and login as a valid user.
-          * - Do not forget to add a user in Keycloak to the group "/Jenkins-admin" to be able to manage the server.
           "********************************************************************************************************
 
+    # Information about debugging Jenkins
+    # journalctl -u jenkins.service
+    
+    # cat  /var/lib/jenkins/logging-jb.properties
 
+    #handlers = java.util.logging.ConsoleHandler
+    #
+    ## see https://docs.oracle.com/en/java/javase/11/docs/api/java.logging/java/util/logging/SimpleFormatter.html
+    #java.util.logging.SimpleFormatter.format = [%1$tF %1$tT][%4$-6s][%2$s] %5$s %6$s %n
+    #
+    ## Keep this level to ALL or FINEST or it will be filtered before applying other levels
+    #java.util.logging.ConsoleHandler.level = ALL
+    #
+    ## Default level
+    #.level= DEBUG
+    #
+    ## High verbosity for a d
+
+    # vim /etc/default/jenkins
+    # add to last JENKINS:   -Djava.util.logging.config.file=/var/lib/jenkins/logging-jb.properties
+    
+    # Settings found in
+    # org.jenkinsci.plugins.KeycloakSecurityRealm.xml:  &quot;auth-server-url&quot;: &quot;https://ad.{{ domain }}/&quot;
+
+    # plugin  	OpenId Connect Authentication Version 1.8 Authentication and User Management 
+    # https://ad.{{ domain }}:8443/realms/ONESTEIN.LAN/.well-known/openid-configuration
 
