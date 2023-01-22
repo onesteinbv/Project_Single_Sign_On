@@ -36,7 +36,7 @@
     "saml.signing.certificate": "{{ sp_crt.stdout }}",
     "saml.signing.private.key": "{{ sp_key.stdout }}",
     "saml_force_name_id_format": "true",
-    "saml_name_id_format": "email",
+    "saml_name_id_format": "username",
     "saml_signature_canonicalization_method": "http://www.w3.org/2001/10/xml-exc-c14n#",
     "saml_single_logout_service_url_redirect": "{{ zabbix_server_url }}/index_sso.php?sls",
     "tls.client.certificate.bound.access.tokens": "false",
@@ -64,17 +64,30 @@
   "protocol": "saml",
   "protocolMappers": [
     {
-      "config": {
-        "attribute.name": "zabbixuser",
-        "friendly.name": "zabbixuser",
-        "user.attribute": "zabbixuser"
-      },
-      "consentRequired": false,
       "id": "{{ lookup('community.general.random_string', length=20) | to_uuid }}",
       "name": "zabbixuser",
       "protocol": "saml",
-      "protocolMapper": "saml-user-attribute-mapper"
+      "protocolMapper": "saml-user-attribute-mapper",
+      "consentRequired": false,
+      "config": {
+        "user.attribute": "email",
+        "friendly.name": "email",
+        "attribute.name": "email"
+      }
+    },
+    {
+      "id": "{{ lookup('community.general.random_string', length=20) | to_uuid }}",
+      "name": "role list",
+      "protocol": "saml",
+      "protocolMapper": "saml-role-list-mapper",
+      "consentRequired": false,
+      "config": {
+        "single": "true",
+        "attribute.nameformat": "Basic",
+        "attribute.name": "Role"
+      }
     }
+
   ],
   "publicClient": false,
   "redirectUris": [
