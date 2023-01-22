@@ -122,7 +122,7 @@
         state: directory
         mode: '0755'
 
-    - name: Copy SSL key and cert to apache ssl dir
+    - name: Copy SSL key and cert to ssl dir
       copy:
         src: "files/{{ item }}"
         dest: "/etc/nginx/ssl/{{ item }}"
